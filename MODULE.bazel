@@ -46,6 +46,19 @@ single_version_override(
     registry = "https://ghproxy.net/https://raw.githubusercontent.com/baidu/babylon/main/registry",
 )
 
+# rules_cc transitive: bazel_features tarball is fetched from GitHub Releases (often blocked in CN).
+archive_override(
+    module_name = "bazel_features",
+    integrity = "sha256-LwV90CCYoQYJXqKRtDRCVzmKBZ6tssdMxHDeD5Zk3M0=",
+    strip_prefix = "bazel_features-1.28.0",
+    urls = [
+        "https://ghproxy.net/https://github.com/bazel-contrib/bazel_features/releases/download/v1.28.0/bazel_features-v1.28.0.tar.gz",
+        "https://github.com/bazel-contrib/bazel_features/releases/download/v1.28.0/bazel_features-v1.28.0.tar.gz",
+    ],
+    patches = ["//third_party/registry_patches/bazel_features:module_dot_bazel_version.patch"],
+    patch_strip = 1,
+)
+
 # ─── http_archive 依赖（非 BCR，需手动声明） ──────────────────────────────────
 
 http_archive = use_repo_rule(

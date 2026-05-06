@@ -31,7 +31,7 @@ Other OS or CPU (e.g. **`bazelisk-linux-arm64`**): download the matching binary 
 - **Bazel** (required): builds go through **Bazel** only; the repo pins **7.4.1** in [`.bazelversion`](.bazelversion) (installed Bazelisk will download that release on first run).
 - **C++17 toolchain**: GCC or Clang with `ar` / `ranlib`. `make bundle-lib` and `install` link `libyikv.so` with **`g++`** unless you set **`CXX`**.
 - **Bash**: `Makefile` **`install-headers`** relies on Bash (`read -d ''`); **`SHELL := /bin/bash`** is assumed.
-- **Network** (first build): MODULE dependencies download from **Bazel Central Registry** (`bcr.bazel.build`) and custom **`--registry=...`** entries in [`.bazelrc`](.bazelrc). GitHub **`raw.githubusercontent.com`** registry roots and **`brpc`** `http_archive` use the **`https://ghproxy.net/https://...`** mirror prefix by default for users in mainland China; edit [`.bazelrc`](.bazelrc), `MODULE.bazel`, or drop the ghproxy segment if you have direct GitHub access.
+- **Network** (first build): MODULE dependencies download from **Bazel Central Registry** (`bcr.bazel.build`) and custom **`--registry=...`** entries in [`.bazelrc`](.bazelrc). GitHub **`raw.githubusercontent.com`** registry roots and **`brpc`** `http_archive` use the **`https://ghproxy.net/https://...`** mirror prefix by default where applicable. **`bazel_features`** (pulled by **`rules_cc`**) is mirrored the same way via **`archive_override`** in [`MODULE.bazel`](MODULE.bazel); edit or remove that block if the proxy is unnecessary or fails.
 
 Convenience targets (`make all`, `make install`) still invoke Bazel under the hood—you need a working **`bazel`** on `PATH`.
 
