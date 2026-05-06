@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "src/alloc/ft_allocator.h"
+#include "src/db/arena_lock.h"
 #include "src/db/file_io.h"
 #include "src/db/index_meta.h"
 #include "src/index/inverted_index.h"
@@ -21,13 +22,15 @@ std::unique_ptr<DB> g_db;
 
 constexpr const char kSchemaFile[] = "schema.json";
 constexpr const char kMetaFile[]   = "index.meta.json";
-constexpr const char kArenaBase[]  = "arena";
+constexpr const char kArenaBase[]       = "arena";
+constexpr const char kArenaLockFile[] = "arena.lock";
 
 }  // namespace
 
 struct DB::IndexSlot {
     enum class Kind { KV, Inverted };
 
+    std::unique_ptr<ArenaExclusiveLock> arena_lock;
     Kind                                  kind = Kind::KV;
     std::string                           name;
     alloc::FtAllocator                    alloc;
@@ -65,6 +68,10 @@ std::string DB::ArenaPath(std::string_view name) const {
     return JoinIndexDir(name) + "/" + kArenaBase;
 }
 
+std::string DB::ArenaLockPath(std::string_view name) const {
+    return JoinIndexDir(name) + "/" + kArenaLockFile;
+}
+
 alloc::AllocatorOptions DB::ArenaOptionsFor(std::string_view name) const {
     alloc::AllocatorOptions o = alloc_defaults_;
     o.path                    = ArenaPath(name);
@@ -80,9 +87,10 @@ void DB::Init(DBOptions options) {
     if (ec)
         throw std::runtime_error("DB::Init: create_directories " + options.db_path + ": " +
                                  ec.message());
-    g_db                    = std::unique_ptr<DB>(new DB());
-    g_db->db_path_           = std::move(options.db_path);
-    g_db->alloc_defaults_  = std::move(options.alloc_defaults);
+    g_db                           = std::unique_ptr<DB>(new DB());
+    g_db->db_path_                 = std::move(options.db_path);
+    g_db->exclusive_arena_lock_    = options.exclusive_arena_lock;
+    g_db->alloc_defaults_         = std::move(options.alloc_defaults);
 }
 
 DB& DB::Instance() {
@@ -127,6 +135,9 @@ void DB::CreateKVIndex(std::string_view name, const schema::Schema& schema) {
         if (!slot->schema.LoadJson(schema.ToJson(), &err_copy))
             throw std::runtime_error("DB::CreateKVIndex: schema copy: " + err_copy);
     }
+    if (exclusive_arena_lock_) {
+        slot->arena_lock = std::make_unique<ArenaExclusiveLock>(ArenaLockPath(name));
+    }
     slot->alloc.Open(ArenaOptionsFor(name));
     slot->kv = std::make_unique<index::KVIndex>(&slot->alloc, &slot->schema, 0, 0);
 
@@ -168,6 +179,9 @@ void DB::CreateInvertedIndex(std::string_view name, const schema::Schema& schema
         if (!slot->schema.LoadJson(schema.ToJson(), &err_copy))
             throw std::runtime_error("DB::CreateInvertedIndex: schema copy: " + err_copy);
     }
+    if (exclusive_arena_lock_) {
+        slot->arena_lock = std::make_unique<ArenaExclusiveLock>(ArenaLockPath(name));
+    }
     slot->alloc.Open(ArenaOptionsFor(name));
     slot->inv =
         std::make_unique<index::InvertedIndex>(&slot->alloc, &slot->schema, 0, 0, 0);
@@ -205,6 +219,9 @@ void DB::OpenIndex(std::string_view name) {
     if (!LoadIndexMeta(ReadWholeFile(MetaPath(name)), &meta, &meta_err))
         throw std::runtime_error("DB::OpenIndex: meta: " + meta_err);
 
+    if (exclusive_arena_lock_) {
+        slot->arena_lock = std::make_unique<ArenaExclusiveLock>(ArenaLockPath(name));
+    }
     slot->alloc.Open(ArenaOptionsFor(name));
 
     switch (meta.kind) {

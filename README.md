@@ -51,6 +51,7 @@ The `DB` class is a **process-wide singleton**. You initialize it once with `Ini
 yikv::db::DBOptions opt;
 opt.db_path = "/var/lib/yikv/data";   // root directory (created if missing)
 opt.alloc_defaults.arena_size = 256ull * 1024 * 1024;  // default arena segment sizing; see below
+// opt.exclusive_arena_lock = true;  // default; see "Arena lock file" below
 
 yikv::db::DB::Init(std::move(opt));
 yikv::db::DB& db = yikv::db::DB::Instance();
@@ -58,7 +59,7 @@ yikv::db::DB& db = yikv::db::DB::Instance();
 
 - **`db_path`**: Root path for all indexes. `Init` creates this directory if it does not exist.
 - **`alloc_defaults`**: Default `yikv::alloc::AllocatorOptions` for every index. The DB sets `path` per index to `<db_path>/<index_name>/arena` (and growth segments). You normally tune **`arena_size`**, **`segment_size`**, **`max_arena_size`**, **`mode`**, and **`reclaim_delay_ns`** here; do not rely on `path` in `alloc_defaults` for multi-index layout—the DB overwrites it per index.
-
+- **`exclusive_arena_lock`** (default **`true`**): Before mmap, each opened index acquires an advisory non-blocking **`flock(LOCK_EX)`** on `<db_path>/<name>/arena.lock` (creating the file if missing). That reduces the chance of two processes mapping the same **`MAP_SHARED`** arena for writes and corrupting it. Locks are released when the index slot is torn down (`CloseAll` / process exit). This is **advisory** (all cooperating writers must use the same locking discipline). Behavior on networked filesystems can differ from local disks. Set to **`false`** only in tightly controlled tooling or tests—not for concurrent production writers on the same index directory.
 Call **`Init` exactly once** per process. Calling `Instance()` before `Init` throws. Calling `Init` when already initialized throws.
 
 For unit tests, **`DB::ResetForTest()`** tears down the singleton so another `Init` can run in the same process.
@@ -72,6 +73,7 @@ For an index named `<name>` (non-empty, no `/` or `\`):
 | `<db_path>/<name>/schema.json` | Schema JSON (written at create / used on open) |
 | `<db_path>/<name>/index.meta.json` | Index kind (KV vs inverted) and recovery offsets into the arena |
 | `<db_path>/<name>/arena` | Primary mmap arena file (`FtAllocator`); additional `.segN` files may appear when the arena grows |
+| `<db_path>/<name>/arena.lock` | Advisory exclusive lock file (when `exclusive_arena_lock` is true); touched on first open |
 
 ### Creating indexes
 

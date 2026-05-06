@@ -16,11 +16,13 @@ cc_binary(
 cc_library(
     name = "db",
     srcs = [
+        "arena_lock.cc",
         "db.cc",
         "file_io.cc",
         "index_meta.cc",
     ],
     hdrs = [
+        "arena_lock.h",
         "db.h",
         "file_io.h",
         "index_meta.h",

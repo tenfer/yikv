@@ -21,11 +21,15 @@ namespace db {
 struct DBOptions {
     std::string                  db_path;
     yikv::alloc::AllocatorOptions alloc_defaults;
+    // When true (default), each opened index takes a non-blocking exclusive flock on
+    // db_path/<name>/arena.lock before mmap. Disable only for controlled tests/tools.
+    bool                         exclusive_arena_lock = true;
 };
 
 // Process-wide singleton: call Init once, then Instance().
 // Each named index lives under db_path/<name>/ with schema.json, index.meta.json,
-// and mmap arena file "arena" (FtAllocator first segment; .segN for growth).
+// mmap arena file "arena" (FtAllocator first segment; .segN for growth), and
+// optional advisory lock file "arena.lock" when exclusive_arena_lock is true.
 class DB {
 public:
     static void Init(DBOptions options);
@@ -56,11 +60,13 @@ private:
     std::string SchemaPath(std::string_view name) const;
     std::string MetaPath(std::string_view name) const;
     std::string ArenaPath(std::string_view name) const;
+    std::string ArenaLockPath(std::string_view name) const;
 
     yikv::alloc::AllocatorOptions ArenaOptionsFor(std::string_view name) const;
 
     std::mutex                                                 mu_;
     std::string                                                db_path_;
+    bool                                                       exclusive_arena_lock_{true};
     yikv::alloc::AllocatorOptions                              alloc_defaults_;
     std::unordered_map<std::string, std::unique_ptr<IndexSlot>> indexes_;
 };

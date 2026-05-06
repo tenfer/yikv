@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+
 using yikv::alloc::AllocatorOptions;
 using yikv::db::DB;
 using yikv::db::DBOptions;
@@ -480,4 +484,49 @@ TEST_F(DBTest, InvertedDeleteRemovesFromPostingsAndPersists) {
     EXPECT_FALSE(again->Query(kFidBio, "unique", &bm3));
     Doc miss;
     EXPECT_FALSE(again->Get("500", &miss));
+}
+
+TEST_F(DBTest, OpenIndexFailsWhenArenaLockHeldExternally) {
+    DB::Instance().CreateKVIndex("locked", kv_schema_);
+    DB::Instance().CloseAll();
+
+    const std::string lock_path = root_ + "/locked/arena.lock";
+    int               fd        = ::open(lock_path.c_str(), O_RDWR | O_CREAT, 0644);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::flock(fd, LOCK_EX), 0);
+
+    EXPECT_THROW(DB::Instance().OpenIndex("locked"), std::runtime_error);
+
+    ASSERT_EQ(::close(fd), 0);
+    ASSERT_NO_THROW(DB::Instance().OpenIndex("locked"));
+    KVIndex* idx = DB::Instance().GetKVIndex("locked");
+    ASSERT_NE(idx, nullptr);
+}
+
+TEST_F(DBTest, OpenIndexBypassesLockWhenExclusiveArenaLockDisabled) {
+    DB::Instance().CreateKVIndex("nolock", kv_schema_);
+    DB::Instance().CloseAll();
+    DB::ResetForTest();
+
+    DBOptions opt;
+    opt.db_path                 = root_;
+    opt.alloc_defaults          = TestArenaOpts();
+    opt.exclusive_arena_lock    = false;
+    DB::Init(std::move(opt));
+
+    const std::string lock_path = root_ + "/nolock/arena.lock";
+    int               fd        = ::open(lock_path.c_str(), O_RDWR | O_CREAT, 0644);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::flock(fd, LOCK_EX), 0);
+
+    EXPECT_NO_THROW(DB::Instance().OpenIndex("nolock"));
+    ASSERT_EQ(::close(fd), 0);
+}
+
+TEST_F(DBTest, ReopenAfterCloseAllInSameProcess) {
+    DB::Instance().CreateKVIndex("r", kv_schema_);
+    DB::Instance().CloseAll();
+    ASSERT_NO_THROW(DB::Instance().OpenIndex("r"));
+    KVIndex* idx = DB::Instance().GetKVIndex("r");
+    ASSERT_NE(idx, nullptr);
 }
