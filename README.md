@@ -15,6 +15,15 @@ The project is **still in progress**; APIs and on-disk formats may change. If yo
 - `src/schema`: unified schema and document metadata
 - `src/index`: KV, inverted, and vector index interfaces and implementations
 
+## Prerequisites
+
+- **Bazel** (required): this repo builds with **Bazel** only; the checked-in version is **7.4.1** in [`.bazelversion`](.bazelversion). Use [Bazelisk](https://github.com/bazelbuild/bazelisk) (`bazel`) so that version is used automatically.
+- **C++17 toolchain**: GCC or Clang with `ar` / `ranlib`. `make bundle-lib` and `install` link `libyikv.so` with **`g++`** unless you set **`CXX`**.
+- **Bash**: `Makefile` **`install-headers`** relies on Bash (`read -d ''`); **`SHELL := /bin/bash`** is assumed.
+- **Network** (first build): MODULE dependencies download from **Bazel Central Registry** and the extra **`--registry=...`** entries in [`.bazelrc`](.bazelrc).
+
+Convenience targets (`make all`, `make install`) still invoke Bazel under the hood—you need a working **`bazel`** on `PATH`.
+
 ## Build
 
 ```bash

@@ -37,6 +37,19 @@ mkdir -p "${BIN}"
 mapfile -t OBJS < <(find "${TMP}" -type f '(' -name '*.o' -o -name '*.pic.o' ')' \
   ! -path '*/CMakeFiles/*' | LC_ALL=C sort)
 
+# Bazel sometimes emits PIC objects under _objs/ without a lib*.pic.a wrapper (e.g. kv_index).
+# Pull in those .pic.o files when their basename is not already contributed by an archive.
+declare -A seen_base
+for o in "${OBJS[@]}"; do
+  seen_base["$(basename "$o")"]=1
+done
+while IFS= read -r -d '' lone; do
+  b="$(basename "${lone}")"
+  [[ -n "${seen_base[${b}]:-}" ]] && continue
+  seen_base["${b}"]=1
+  OBJS+=("${lone}")
+done < <(find "${BIN}/src" -path '*/_objs/*' -type f -name '*.pic.o' -print0 | LC_ALL=C sort -z)
+
 if [[ ${#OBJS[@]} -eq 0 ]]; then
   echo "bundle-libyikv: extracted no .o from archives" >&2
   exit 1
