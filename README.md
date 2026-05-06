@@ -234,3 +234,68 @@ Matches the flow in `tests/db_test.cc`:
 ### Error handling
 
 Invalid index names, missing directories, schema/meta parse errors, and type mismatches surface as **`std::runtime_error`** or **`std::invalid_argument`** with message prefixes such as `DB::CreateKVIndex:` / `DB::OpenIndex:`. Plan to catch and log these at application boundaries.
+
+---
+
+## Benchmarks
+
+Micro-benchmarks use [Google Benchmark](https://github.com/google/benchmark). Targets are plain **`cc_binary`** in [`tests/BUILD`](tests/BUILD) (not part of **`//tests:all_tests`**).
+
+### How to run
+
+```bash
+# Build only
+make benchmark
+bazel build -c opt //tests:kv_index_benchmark //tests:db_benchmark
+
+# KV index layer (mmap arena + HashMap, no DB singleton)
+bazel run -c opt //tests:kv_index_benchmark -- --benchmark_min_time=0.1s
+
+# DB layer (temp dirs, mmap, Create/Open, inverted)
+bazel run -c opt //tests:db_benchmark -- --benchmark_min_time=0.1s
+```
+
+Useful flags (after **`--`**):
+
+```bash
+bazel run -c opt //tests:db_benchmark -- --benchmark_list_tests
+bazel run -c opt //tests:kv_index_benchmark -- --benchmark_filter='GetHit'
+```
+
+Binaries appear under **`bazel-bin/tests/kv_index_benchmark`** and **`bazel-bin/tests/db_benchmark`**. On mainland China, use **`make GHPROXY=1 benchmark`** like other Makefile targets.
+
+### What each binary measures
+
+| Binary | Focus |
+|--------|--------|
+| **`kv_index_benchmark`** | **`KVIndex`** only: unique inserts (`PutUnique`), hot-row `Get`, scaled `Get` after N rows, same-key upserts. Arena sizing is fixed in source; several cases use **`Iterations(...)`** so mmap use stays bounded. |
+| **`db_benchmark`** | Full **`DB`**: **`CreateKVIndex`** with unique PK + **`Publish`**, inverted **`Put` + `Query`**, and **cold** **`OpenIndex` + full `Get` scan** after on-disk seed rows (`BM_DB_ColdOpenScan` **Arg** = row count). |
+
+### Reference performance (sample only)
+
+Recorded with **`-c opt`**, Google Benchmark **`--benchmark_min_time=0.05s`**, **2026-05-06**, on **16 logical CPUs** (~3.8 GHz nominal), Linux. **Figures vary** with CPU, turbo, **`/tmp`**, and load.
+
+#### `kv_index_benchmark`
+
+| Benchmark | CPU time | Notes |
+|-----------|----------|--------|
+| `BM_KVIndex_PutUnique/512` (40k iterations) | ~4.4 µs / op | Arg 512 = arena sizing in benchmark; unique PK each op. |
+| `BM_KVIndex_GetHit` | ~0.030 µs / op | Single hot key lookup. |
+| `BM_KVIndex_GetHitAtScale/100` … `/10000` | ~0.026–0.027 µs / op | Same lookup after 100 / 1k / 10k seeded rows (this machine). |
+| `BM_KVIndex_PutUpsertSameKey` (40k iters) | ~2.0 µs / op | Same PK every iteration. |
+
+#### `db_benchmark`
+
+| Benchmark | CPU time | Notes |
+|-----------|----------|--------|
+| `BM_DB_KV_PutUnique` (30k iters) | ~5.4 µs / iter | **`Put` + `Publish`** per iteration. |
+| `BM_DB_Inverted_PutAndQuery` (15k iters) | ~5.0 µs / iter | One inverted row + **`Query("beta")`** per iter. |
+| `BM_DB_ColdOpenScan/200` | ~122 µs / iter | Per iter: **`Init` → `OpenIndex` → 200 × `Get`**. |
+| `BM_DB_ColdOpenScan/2000` | ~287 µs / iter | Same with 2000 keys scanned. |
+
+Reproduce:
+
+```bash
+bazel run -c opt //tests:kv_index_benchmark -- --benchmark_min_time=0.1s --benchmark_repetitions=1
+bazel run -c opt //tests:db_benchmark -- --benchmark_min_time=0.1s --benchmark_repetitions=1
+```
