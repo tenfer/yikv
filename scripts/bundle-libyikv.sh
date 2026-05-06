@@ -6,13 +6,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+yikv_bazel() {
+  if [[ "${YIKV_BAZEL_GHPROXY:-}" == 1 ]]; then
+    bazel --noworkspace_rc \
+      --bazelrc="$ROOT/bazel/registries/ghproxy.bazelrc" \
+      --bazelrc="$ROOT/bazel/buildflags.bazelrc" "$@"
+  else
+    bazel "$@"
+  fi
+}
+
 MODE="${YIKV_COMPILATION_MODE:-opt}"
 
 # shellcheck disable=SC2086
-bazel build -c "${MODE}" ${EXTRA_BAZEL_FLAGS:-} ${BAZEL_FLAGS:-} \
+yikv_bazel build -c "${MODE}" ${EXTRA_BAZEL_FLAGS:-} ${BAZEL_FLAGS:-} \
   //src/db:db >/dev/null
 
-BIN="$(bazel info -c "${MODE}" bazel-bin)"
+BIN="$(yikv_bazel info -c "${MODE}" bazel-bin)"
 
 mapfile -t LIBS < <(find "${BIN}/src" -type f -name 'lib*.pic.a' | LC_ALL=C sort -u)
 
