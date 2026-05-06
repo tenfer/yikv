@@ -28,7 +28,7 @@ bazel_dep(name = "libunwind", version = "1.8.1", repo_name = "com_github_libunwi
 bazel_dep(name = "leveldb", version = "1.23", repo_name = "com_github_google_leveldb")
 single_version_override(
     module_name = "leveldb",
-    registry = "https://raw.githubusercontent.com/secretflow/bazel-registry/main",
+    version = "1.23",
 )
 
 # ── 自定义 registry 依赖（babylon registry，用于 babylon + thrift） ───────────
@@ -36,14 +36,25 @@ bazel_dep(name = "babylon", version = "1.4.0")
 single_version_override(
     module_name = "babylon",
     version = "1.4.0",
-    registry = "https://raw.githubusercontent.com/baidu/babylon/main/registry",
 )
 
 bazel_dep(name = "thrift", version = "0.21.0", repo_name = "org_apache_thrift")
 single_version_override(
     module_name = "thrift",
     version = "0.21.0",
-    registry = "https://raw.githubusercontent.com/baidu/babylon/main/registry",
+)
+
+# rules_cc transitive: bazel_features tarball is fetched from GitHub Releases (often blocked in CN).
+archive_override(
+    module_name = "bazel_features",
+    integrity = "sha256-LwV90CCYoQYJXqKRtDRCVzmKBZ6tssdMxHDeD5Zk3M0=",
+    strip_prefix = "bazel_features-1.28.0",
+    urls = [
+        "https://github.com/bazel-contrib/bazel_features/releases/download/v1.28.0/bazel_features-v1.28.0.tar.gz",
+        "https://ghproxy.net/https://github.com/bazel-contrib/bazel_features/releases/download/v1.28.0/bazel_features-v1.28.0.tar.gz",
+    ],
+    patches = ["//third_party:bazel_features_module_dot_bazel_version.patch"],
+    patch_strip = 1,
 )
 
 # ─── http_archive 依赖（非 BCR，需手动声明） ──────────────────────────────────
@@ -95,7 +106,7 @@ cc_library(
 #     name = "com_github_roaringbitmap_croaring",
 #     sha256 = "...",
 #     strip_prefix = "CRoaring-4.1.4",
-#     urls = ["https://github.com/RoaringBitmap/CRoaring/archive/refs/tags/v4.1.4.tar.gz"],
+#     urls = ["https://ghproxy.net/https://github.com/RoaringBitmap/CRoaring/archive/refs/tags/v4.1.4.tar.gz"],
 #     build_file_content = """
 # load("@rules_cc//cc:defs.bzl", "cc_library")
 # package(default_visibility = ["//visibility:public"])
@@ -124,5 +135,8 @@ http_archive(
     name = "com_github_apache_brpc",
     sha256 = "60f218554527f05ad8fae3cb8f81879d0c7dc72b249cde132049c44b1a73e76d",
     strip_prefix = "brpc-1.16.0",
-    urls = ["https://github.com/apache/brpc/archive/refs/tags/1.16.0.tar.gz"],
+    urls = [
+        "https://github.com/apache/brpc/archive/refs/tags/1.16.0.tar.gz",
+        "https://ghproxy.net/https://github.com/apache/brpc/archive/refs/tags/1.16.0.tar.gz",
+    ],
 )

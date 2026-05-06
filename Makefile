@@ -22,6 +22,17 @@ export EXTRA_BAZEL_FLAGS
 export BAZEL_FLAGS
 export YIKV_COMPILATION_MODE
 
+# China / blocked GitHub: use ghproxy-backed custom registries (babylon + secretflow mirrors).
+GHPROXY ?= 0
+ifeq ($(GHPROXY),1)
+export YIKV_BAZEL_GHPROXY := 1
+_YIKV_REG := $(CURDIR)/bazel/registries/ghproxy.bazelrc
+else
+_YIKV_REG := $(CURDIR)/bazel/registries/default.bazelrc
+endif
+# Omit workspace .bazelrc so registry file choice is deterministic (paired with buildflags).
+BAZEL := bazel --noworkspace_rc --bazelrc=$(_YIKV_REG) --bazelrc=$(CURDIR)/bazel/buildflags.bazelrc
+
 # GNU-style install layout (FHS).
 PREFIX       ?= /usr/local
 EXEC_PREFIX  ?= $(PREFIX)
@@ -53,7 +64,7 @@ INSTALL_HEADERS ?= 1
 .PHONY: all db_tool benchmark bundle-lib static_lib shared_lib install install-lib install-headers install-db uninstall uninstall-lib uninstall-db uninstall-docs test debug clean check
 
 all:
-	bazel build -c $(YIKV_COMPILATION_MODE) $(BAZEL_FLAGS) \
+	$(BAZEL) build -c $(YIKV_COMPILATION_MODE) $(BAZEL_FLAGS) \
 		//src/db:db_tool \
 		//tests:kv_index_benchmark \
 		//tests:db_benchmark \
@@ -114,26 +125,26 @@ uninstall-docs:
 uninstall: uninstall-docs uninstall-db uninstall-lib
 
 db_tool:
-	bazel build -c $(YIKV_COMPILATION_MODE) $(BAZEL_FLAGS) //src/db:db_tool
+	$(BAZEL) build -c $(YIKV_COMPILATION_MODE) $(BAZEL_FLAGS) //src/db:db_tool
 
 benchmark:
-	bazel build -c $(YIKV_COMPILATION_MODE) $(BAZEL_FLAGS) \
+	$(BAZEL) build -c $(YIKV_COMPILATION_MODE) $(BAZEL_FLAGS) \
 		//tests:kv_index_benchmark \
 		//tests:db_benchmark
 
 # Like RocksDB make check (debug compilation for tests).
 check:
-	bazel test -c dbg $(BAZEL_FLAGS) //tests:all_tests
+	$(BAZEL) test -c dbg $(BAZEL_FLAGS) //tests:all_tests
 
 test:
-	bazel test -c $(YIKV_COMPILATION_MODE) $(BAZEL_FLAGS) //tests:all_tests
+	$(BAZEL) test -c $(YIKV_COMPILATION_MODE) $(BAZEL_FLAGS) //tests:all_tests
 
 debug:
-	bazel build --config=debug $(BAZEL_FLAGS) \
+	$(BAZEL) build --config=debug $(BAZEL_FLAGS) \
 		//src/db:db_tool \
 		//tests:kv_index_benchmark \
 		//tests:db_benchmark \
 		//tests:all_tests
 
 clean:
-	bazel clean
+	$(BAZEL) clean

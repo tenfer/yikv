@@ -1,0 +1,4 @@
+# ghproxy mirrors (mainland China): use via `make GHPROXY=1` or export YIKV_BAZEL_GHPROXY=1 + bundle script / Makefile.
+common --registry=https://bcr.bazel.build
+common --registry=https://ghproxy.net/https://raw.githubusercontent.com/baidu/babylon/main/registry
+common --registry=https://ghproxy.net/https://raw.githubusercontent.com/secretflow/bazel-registry/main
