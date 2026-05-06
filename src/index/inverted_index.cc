@@ -13,7 +13,7 @@ InvertedIndex::InvertedIndex(alloc::Allocator*   alloc,
                              uint64_t posting_hdr_off)
     : KVIndex(alloc, schema, index_hdr_off, docs_hdr_off) {
     postings_ = std::make_unique<container::HashMap<std::string, uint64_t>>(
-        alloc_, posting_hdr_off);
+        alloc_, posting_hdr_off, 15);
 }
 
 // ── Text helpers ─────────────────────────────────────────────────────────────

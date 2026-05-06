@@ -23,13 +23,19 @@ namespace index {
 //   index_hdr_off : arena offset of the IndexHeader (holds next_doc_id).
 //   docs_hdr_off  : arena offset of the HashMap root node.
 // Pass both as 0 to create a fresh index.
+//
+// When docs_hdr_off == 0 (new index), initial_docs_bucket_bits configures the
+// HashMap's initial bucket table (2^n buckets; rehash roughly at 2*n entries
+// due to kLoadFactor). Larger values reduce rehash churn on bulk inserts at
+// the cost of a slightly larger root; ignored on recovery (non-zero hdr).
 
 class KVIndex : public Index {
 public:
     explicit KVIndex(alloc::Allocator*   alloc,
                      const schema::Schema* schema,
-                     uint64_t index_hdr_off = 0,
-                     uint64_t docs_hdr_off  = 0);
+                     uint64_t index_hdr_off        = 0,
+                     uint64_t docs_hdr_off         = 0,
+                     uint32_t initial_docs_bucket_bits = 15);
 
     ~KVIndex() override = default;
 
