@@ -1,6 +1,6 @@
 # yikv
 
-`yikv` is a layered retrieval and storage project under active refactoring. **Bazel** is the primary build system.
+`yikv` is a layered retrieval and storage project under active refactoring base on mmap. **Bazel** is the primary build system.
 
 ## Project status & contact
 
