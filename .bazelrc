@@ -1,7 +1,9 @@
-# ── 额外 registry（brpc 1.16.0 依赖的自定义 registry） ─────────────────────────
+# ── 额外 registry（GitHub raw；国内可走 ghproxy）──────────────────────────────
+# 前缀: https://ghproxy.net/https://raw.githubusercontent.com/...
+# 若代理不可用，改回直连 https://raw.githubusercontent.com/... 即可。
 common --registry=https://bcr.bazel.build
-common --registry=https://raw.githubusercontent.com/baidu/babylon/main/registry
-common --registry=https://raw.githubusercontent.com/secretflow/bazel-registry/main
+common --registry=https://ghproxy.net/https://raw.githubusercontent.com/baidu/babylon/main/registry
+common --registry=https://ghproxy.net/https://raw.githubusercontent.com/secretflow/bazel-registry/main
 
 # ── 编译 ──────────────────────────────────────────────────────────────────────
 # C++17 全局生效，无需在各 BUILD 文件中重复 copts = ["-std=c++17"]
