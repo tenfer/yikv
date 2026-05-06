@@ -31,7 +31,7 @@ Other OS or CPU (e.g. **`bazelisk-linux-arm64`**): download the matching binary 
 - **Bazel** (required): builds go through **Bazel** only; the repo pins **7.4.1** in [`.bazelversion`](.bazelversion) (installed Bazelisk will download that release on first run).
 - **C++17 toolchain**: GCC or Clang with `ar` / `ranlib`. `make bundle-lib` and `install` link `libyikv.so` with **`g++`** unless you set **`CXX`**.
 - **Bash**: `Makefile` **`install-headers`** relies on Bash (`read -d ''`); **`SHELL := /bin/bash`** is assumed.
-- **Network** (first build): MODULE dependencies download from **Bazel Central Registry** (`bcr.bazel.build`) and custom **`--registry=...`** entries in [`.bazelrc`](.bazelrc). GitHub **`raw.githubusercontent.com`** registry roots and **`brpc`** `http_archive` use the **`https://ghproxy.net/https://...`** mirror prefix by default where applicable. **`bazel_features`** (pulled by **`rules_cc`**) is mirrored the same way via **`archive_override`** in [`MODULE.bazel`](MODULE.bazel); edit or remove that block if the proxy is unnecessary or fails.
+- **Network** (first build): Dependencies resolve via **Bazel Central Registry** and two custom **`--registry=`** sources for **babylon** / **secretflow** (see [`bazel/registries/default.bazelrc`](bazel/registries/default.bazelrc)). Default is **GitHub direct** (`raw.githubusercontent.com`). **`MODULE.bazel` tarball URLs** (**`brpc`**, **`bazel_features`**) try **GitHub Releases first**, then **`ghproxy.net`** as fallback. Inside mainland China, use **`make GHPROXY=1 …`** so Makefile (and **`scripts/bundle-libyikv.sh`** when **`YIKV_BAZEL_GHPROXY=1`** is set) load [`bazel/registries/ghproxy.bazelrc`](bazel/registries/ghproxy.bazelrc) instead of the default registry file. For **`bazel`** without Make: `bazel --noworkspace_rc --bazelrc=bazel/registries/ghproxy.bazelrc --bazelrc=bazel/buildflags.bazelrc build //…`. Plain **`bazel build`** with only the workspace [`.bazelrc`](.bazelrc) uses **direct** registries by default.
 
 Convenience targets (`make all`, `make install`) still invoke Bazel under the hood—you need a working **`bazel`** on `PATH`.
 
@@ -39,7 +39,9 @@ Convenience targets (`make all`, `make install`) still invoke Bazel under the ho
 
 ```bash
 bazel build //... && bazel test //tests:all_tests
+
 make all          # tools + tests + lib merge → bazel-bin/libyikv.{a,so}
+make GHPROXY=1 all   # optional: babylon/secretflow registry JSON via ghproxy (mainland China)
 make bundle-lib   # lib merge only ([scripts/bundle-libyikv.sh](scripts/bundle-libyikv.sh))
 make clean
 make test

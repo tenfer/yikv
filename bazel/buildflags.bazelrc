@@ -1,0 +1,38 @@
+# Build options (included after a registry *.bazelrc).
+# C++17 全局生效，无需在各 BUILD 文件中重复 copts = ["-std=c++17"]
+build --cxxopt="-std=c++17"
+build --host_cxxopt="-std=c++17"
+build --copt="-O2"
+build --copt="-DNDEBUG"
+# GCC 11 在内联 absl::string_view::substr 时对边界检查产生假阳性，
+# protobuf/abseil BUILD 启用了 -Werror，target 和 host 工具链都需要关闭。
+build --copt="-Wno-error=stringop-overread"
+build --host_copt="-Wno-error=stringop-overread"
+
+# ── Release 配置 ──────────────────────────────────────────────────────────────
+build:release --copt="-O3"
+build:release --copt="-march=native"
+build:release --compilation_mode=opt
+build:release --strip=always
+
+# ── Debug 配置（AddressSanitizer） ────────────────────────────────────────────
+build:debug --compilation_mode=dbg
+build:debug --copt="-g3"
+build:debug --copt="-fsanitize=address"
+build:debug --linkopt="-fsanitize=address"
+
+# ── 并行构建 ──────────────────────────────────────────────────────────────────
+build --jobs=auto
+
+# ── brpc 日志配置 ──────────────────────────────────────────────────────────────
+# brpc BUILD.bazel 生成 src/butil/config.h，其中 BRPC_WITH_GLOG 由 select() 控制：
+#   config_setting 的 define_values = {"BRPC_WITH_GLOG": "true"}
+#   值必须是字符串 "true"，不是 "1"，否则 select 不匹配，config.h 里会生成 0。
+# 正确写法：--define=BRPC_WITH_GLOG=true
+build --define=BRPC_WITH_GLOG=true
+
+# ── 输出路径 ──────────────────────────────────────────────────────────────────
+build --symlink_prefix=bazel-
+
+# ── 测试 ──────────────────────────────────────────────────────────────────────
+test --test_output=errors
