@@ -17,7 +17,18 @@ The project is **still in progress**; APIs and on-disk formats may change. If yo
 
 ## Prerequisites
 
-- **Bazel** (required): this repo builds with **Bazel** only; the checked-in version is **7.4.1** in [`.bazelversion`](.bazelversion). Use [Bazelisk](https://github.com/bazelbuild/bazelisk) (`bazel`) so that version is used automatically.
+### Installing Bazel (Bazelisk)
+
+Use **[Bazelisk](https://github.com/bazelbuild/bazelisk)** as the **`bazel`** command so [`.bazelversion`](.bazelversion) is picked up automatically. **Linux x86_64**:
+
+```bash
+sudo curl -L https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 -o /usr/local/bin/bazel
+sudo chmod +x /usr/local/bin/bazel
+```
+
+Other OS or CPU (e.g. **`bazelisk-linux-arm64`**): download the matching binary from the [Bazelisk releases](https://github.com/bazelbuild/bazelisk/releases) page and install it onto your `PATH` as `bazel` the same way.
+
+- **Bazel** (required): builds go through **Bazel** only; the repo pins **7.4.1** in [`.bazelversion`](.bazelversion) (installed Bazelisk will download that release on first run).
 - **C++17 toolchain**: GCC or Clang with `ar` / `ranlib`. `make bundle-lib` and `install` link `libyikv.so` with **`g++`** unless you set **`CXX`**.
 - **Bash**: `Makefile` **`install-headers`** relies on Bash (`read -d ''`); **`SHELL := /bin/bash`** is assumed.
 - **Network** (first build): MODULE dependencies download from **Bazel Central Registry** and the extra **`--registry=...`** entries in [`.bazelrc`](.bazelrc).
