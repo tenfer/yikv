@@ -2,13 +2,18 @@
 
 `yikv` is a layered retrieval and storage project under active refactoring. **Bazel** is the primary build system.
 
+## Project status & contact
+
+The project is **still in progress**; APIs and on-disk formats may change. If you run into **bugs** or have questions from real use, please contact: **fansichi@qq.com**.
+
+**Job search:** the maintainer is **looking for engineering roles** (systems / storage / infrastructure / backend—areas close to this codebase). Referrals, openings, or a short intro are welcome at the same address: **fansichi@qq.com**.
+
 ## Repository layout
 
 - `src/alloc`: mmap / arena allocators
 - `src/container`: core containers (`HashMap`, `Bitmap`, `List`, `Vector`, `String`, …); see [`src/container/README.md`](src/container/README.md) and [`src/container/USAGE.md`](src/container/USAGE.md)
 - `src/schema`: unified schema and document metadata
 - `src/index`: KV, inverted, and vector index interfaces and implementations
-- `src/config`: shared configuration helpers
 
 ## Build and test
 
