@@ -1,0 +1,7 @@
+MODULE.bazel.lock
+.claude
+bazel-out
+bazel-yikv
+bazel-bin
+bazel-testlogs
+src/storage/cmake-build/

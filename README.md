@@ -1,0 +1,195 @@
+# yikv
+
+`yikv` is a layered retrieval and storage project under active refactoring. **Bazel** is the primary build system.
+
+## Repository layout
+
+- `src/alloc`: mmap / arena allocators
+- `src/container`: core containers (`HashMap`, `Bitmap`, `KVTable`, …)
+- `src/schema`: unified schema and document metadata
+- `src/index`: KV, inverted, and vector index interfaces and implementations
+- `src/config`: shared configuration helpers
+
+## Build and test
+
+```bash
+# Full build (libraries, tests, tools)
+bazel build //...
+
+# Example binaries
+bazel build //src/db:db_tool              # small DB CLI / demo binary
+bazel build //tests:kv_index_benchmark    # optional benchmark binary
+
+# Tests
+bazel test //tests:all_tests
+```
+
+Convenience targets (parallel jobs, opt):
+
+```bash
+make all    # builds tests + db_tool + benchmark (see Makefile)
+make test
+make clean
+```
+
+## Notes
+- Prefer extending via the storage abstraction in `src/storage/store.h` and existing Bazel targets.
+- Allocators: [`src/alloc/README.md`](src/alloc/README.md). HashMap / Bitmap usage: [`src/container/USAGE.md`](src/container/USAGE.md).
+
+---
+
+## Database API (`yikv::db::DB`)
+
+The `DB` class is a **process-wide singleton**. You initialize it once with `Init`, then use `Instance()` everywhere. Each logical **index** is a subdirectory of the database root and owns its own mmap arena and metadata files.
+
+### Initialization
+
+```cpp
+#include "src/db/db.h"
+#include "src/schema/schema.h"
+
+yikv::db::DBOptions opt;
+opt.db_path = "/var/lib/yikv/data";   // root directory (created if missing)
+opt.alloc_defaults.arena_size = 256ull * 1024 * 1024;  // default arena segment sizing; see below
+
+yikv::db::DB::Init(std::move(opt));
+yikv::db::DB& db = yikv::db::DB::Instance();
+```
+
+- **`db_path`**: Root path for all indexes. `Init` creates this directory if it does not exist.
+- **`alloc_defaults`**: Default `yikv::alloc::AllocatorOptions` for every index. The DB sets `path` per index to `<db_path>/<index_name>/arena` (and growth segments). You normally tune **`arena_size`**, **`segment_size`**, **`max_arena_size`**, **`mode`**, and **`reclaim_delay_ns`** here; do not rely on `path` in `alloc_defaults` for multi-index layout—the DB overwrites it per index.
+
+Call **`Init` exactly once** per process. Calling `Instance()` before `Init` throws. Calling `Init` when already initialized throws.
+
+For unit tests, **`DB::ResetForTest()`** tears down the singleton so another `Init` can run in the same process.
+
+### On-disk layout per index
+
+For an index named `<name>` (non-empty, no `/` or `\`):
+
+| Path | Purpose |
+|------|---------|
+| `<db_path>/<name>/schema.json` | Schema JSON (written at create / used on open) |
+| `<db_path>/<name>/index.meta.json` | Index kind (KV vs inverted) and recovery offsets into the arena |
+| `<db_path>/<name>/arena` | Primary mmap arena file (`FtAllocator`); additional `.segN` files may appear when the arena grows |
+
+### Creating indexes
+
+Load or build a `yikv::schema::Schema`, then create either a **KV** or **inverted** index:
+
+```cpp
+yikv::schema::Schema schema;
+std::string err;
+if (!schema.LoadJson(json_string, &err)) { /* handle err */ }
+
+db.CreateKVIndex("main", schema);           // exact PK lookup; HashMap → Doc offsets
+db.CreateInvertedIndex("search", schema);   // KV store + term postings for `is_index` fields
+```
+
+- **`CreateKVIndex` / `CreateInvertedIndex`**: Create a **new** directory `<db_path>/<name>/`. If it already exists, creation fails.
+- After creation, the index is **open** in the current process.
+
+### Opening existing indexes
+
+After a restart, recreate the same `DBOptions` (same `db_path` and compatible allocator defaults), call `Init`, then **open** each index you need:
+
+```cpp
+db.OpenIndex("main");   // no-op if already open
+```
+
+`OpenIndex` reads `schema.json` and `index.meta.json`, mmaps the arena, and reconstructs `KVIndex` or `InvertedIndex` from persisted offsets.
+
+### Accessing indexes
+
+```cpp
+yikv::index::KVIndex*       kv = db.GetKVIndex("main");
+yikv::index::InvertedIndex* inv = db.GetInvertedIndex("search");
+```
+
+- Wrong type (e.g. `GetKVIndex` on an inverted index) throws.
+- Unknown name throws.
+
+### Closing
+
+```cpp
+db.CloseAll();   // drops in-memory index handles and closes allocators; data on disk remains
+```
+
+Typical **recovery** pattern: `CloseAll` or process exit → later `Init` + `OpenIndex` for each index.
+
+---
+
+### Schema (JSON)
+
+Schemas are loaded with `Schema::LoadJson`. Canonical JSON includes `table_name`, `pk` (primary key field name), and a `fields` array. Each field should have a stable **`field_id`**, **`data_type`** (e.g. `int32`, `int64`, `string`), **`is_pk`**, and for inverted participation **`is_index`**.
+
+- **KV index**: Primary key field drives storage keys; other fields are stored in the arena `Doc`.
+- **Inverted index**: Subclasses `KVIndex` and maintains posting lists for fields with **`is_index: true`**. Only those fields participate in `Query` / `QueryAnd` / `QueryOr`.
+
+Compatibility rules for evolving schemas are documented in `src/schema/schema.h` (e.g. SparseRowBinary allows appending new fields with new `field_id` values).
+
+---
+
+### `KVIndex` usage
+
+Header: `src/index/kv_index.h`.
+
+1. **`NewDoc()`** — Allocates a new document with a fresh `doc_id` and slots sized from `schema.MaxFieldId()`.
+2. **Fill fields** — Use `Doc` getters/setters with **`field_id`** values that match your schema (same IDs as in JSON), e.g. `doc.put_int64(fid, 42)`, `doc.put_string(fid, "alice")`.
+3. **`Put(Doc* doc)`** — Upserts by primary key. The PK string is derived from the PK field: `int32`/`int64` → `std::to_string(...)`, `string` → the string value (other PK types are not supported in `ExtractPk`).
+4. **`Publish()`** — Publishes staged hash-map changes so readers see updates (and for inverted indexes, postings publish too).
+
+```cpp
+yikv::index::KVIndex* idx = db.GetKVIndex("main");
+yikv::index::Doc doc = idx->NewDoc();
+doc.put_int64(kUserIdFid, 42);
+doc.put_int32(kAgeFid, 7);
+doc.put_string(kNameFid, "alice");
+idx->Put(&doc);
+idx->Publish();
+```
+
+**Read:**
+
+- **`Get(std::string_view pk, Doc* out)`** — `pk` must match the string form used for storage (e.g. `"42"` for int64 `42`).
+- **`BatchGet`**, **`Delete`**, **`BatchPut`** — See `kv_index.h`.
+
+---
+
+### `InvertedIndex` usage
+
+Header: `src/index/inverted_index.h`. Inherits all KV operations; **`Put` / `Delete`** also maintain inverted postings for indexed fields.
+
+**Write:** same as KV: `NewDoc`, set PK and indexed text fields, `Put`, `Publish`.
+
+**Search:**
+
+- **`Query(field_id, term, Bitmap* out)`** — Single normalized term; returns whether the term map existed (`bool`), and fills `out` with a posting bitmap of `doc_id` values.
+- **`QueryAnd(field_id, terms)`** — Documents containing **all** terms in that field.
+- **`QueryOr(field_id, terms)`** — Documents containing **any** of the terms.
+
+Terms are produced from stored text by tokenization and normalization inside the inverted index implementation—query using the same kind of string you expect after normalization (see tests in `tests/db_test.cc`).
+
+```cpp
+yikv::index::InvertedIndex* idx = db.GetInvertedIndex("inv");
+yikv::container::Bitmap bm(idx->alloc(), 0);
+if (idx->Query(kBioFid, "hello", &bm)) {
+  if (bm.Contains(doc_id)) { /* ... */ }
+}
+```
+
+---
+
+### End-to-end recovery example
+
+Matches the flow in `tests/db_test.cc`:
+
+1. `CreateKVIndex` / create docs / `Put` / `Publish`.
+2. `CloseAll()`, then `ResetForTest()` **only in tests**, or simply exit the process.
+3. New process: `Init` with the **same** `db_path`, `OpenIndex("main")`, `GetKVIndex`, `Get` by PK string.
+
+---
+
+### Error handling
+
+Invalid index names, missing directories, schema/meta parse errors, and type mismatches surface as **`std::runtime_error`** or **`std::invalid_argument`** with message prefixes such as `DB::CreateKVIndex:` / `DB::OpenIndex:`. Plan to catch and log these at application boundaries.

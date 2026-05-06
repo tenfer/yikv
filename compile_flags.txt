@@ -1,0 +1,7 @@
+-std=c++17
+-Wall
+-Wextra
+-I.
+-Isrc
+-Iproto
+-Ithird_party
