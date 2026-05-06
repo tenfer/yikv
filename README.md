@@ -15,26 +15,37 @@ The project is **still in progress**; APIs and on-disk formats may change. If yo
 - `src/schema`: unified schema and document metadata
 - `src/index`: KV, inverted, and vector index interfaces and implementations
 
-## Build and test
+## Build
 
 ```bash
-# Full build (libraries, tests, tools)
-bazel build //...
-
-# Example binaries
-bazel build //src/db:db_tool              # small DB CLI / demo binary
-bazel build //tests:kv_index_benchmark    # optional benchmark binary
-
-# Tests
-bazel test //tests:all_tests
+bazel build //... && bazel test //tests:all_tests
+make all          # tools + tests + lib merge → bazel-bin/libyikv.{a,so}
+make bundle-lib   # lib merge only ([scripts/bundle-libyikv.sh](scripts/bundle-libyikv.sh))
+make clean
+make test
+make check        # same tests, Bazel -c dbg
 ```
 
-Convenience targets (parallel jobs, opt):
+## Install
+
+Install layout follows GNU conventions: **`$(DESTDIR)$(PREFIX)`** (default **`PREFIX=/usr/local`**). **`make install`** copies **`libyikv.so`** and **`libyikv.a`** by default (**`INSTALL_STATIC=0`** → shared only; **`INSTALL_SHARED=0`** → static archive only), **`include/yikv/`** mirrors **`src/**/*.h`** (e.g. **`include/yikv/src/db/db.h`**), **`yikv-db_tool`**, README under **`share/doc/yikv`** (skip with **`INSTALL_DOCS_CLI=0`**; skip headers with **`INSTALL_HEADERS=0`**).
 
 ```bash
-make all    # builds tests + db_tool + benchmark (see Makefile)
-make test
-make clean
+sudo make install                                          # typical (.so + .a)
+make install DESTDIR=/tmp/stage PREFIX=/usr              # staging for packages
+sudo make install INSTALL_STATIC=0                       # shared library only
+sudo make install INSTALL_SHARED=0                       # libyikv.a only
+sudo make uninstall                                        # same PREFIX / DESTDIR as install
+```
+
+Portable CPU tuning when building the merged library: **`PORTABLE=1 make bundle-lib`** (generic x86-64) or **`PORTABLE=haswell`** etc. Overrides: **`BINDIR`**, **`LIBDIR`**, **`INCLUDEDIR`**, **`CXX`** (links `.so`; see **`scripts/bundle-libyikv.sh`**).
+
+Consume installed headers as **`#include "src/db/db.h"`** with **`-I$PREFIX/include/yikv`** and **`-std=c++17 -pthread`**:
+
+```bash
+g++ -std=c++17 -pthread -I/usr/local/include/yikv app.cc \
+  -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lyikv
+# static link: .../libyikv.a (installed by default together with libyikv.so)
 ```
 
 ## Notes
@@ -65,7 +76,8 @@ yikv::db::DB& db = yikv::db::DB::Instance();
 - **`db_path`**: Root path for all indexes. `Init` creates this directory if it does not exist.
 - **`alloc_defaults`**: Default `yikv::alloc::AllocatorOptions` for every index. The DB sets `path` per index to `<db_path>/<index_name>/arena` (and growth segments). You normally tune **`arena_size`**, **`segment_size`**, **`max_arena_size`**, **`mode`**, and **`reclaim_delay_ns`** here; do not rely on `path` in `alloc_defaults` for multi-index layout—the DB overwrites it per index.
 - **`exclusive_arena_lock`** (default **`true`**): Before mmap, each opened index acquires an advisory non-blocking **`flock(LOCK_EX)`** on `<db_path>/<name>/arena.lock` (creating the file if missing). That reduces the chance of two processes mapping the same **`MAP_SHARED`** arena for writes and corrupting it. Locks are released when the index slot is torn down (`CloseAll` / process exit). This is **advisory** (all cooperating writers must use the same locking discipline). Behavior on networked filesystems can differ from local disks. Set to **`false`** only in tightly controlled tooling or tests—not for concurrent production writers on the same index directory.
-Call **`Init` exactly once** per process. Calling `Instance()` before `Init` throws. Calling `Init` when already initialized throws.
+
+- Call **`Init` exactly once** per process. Calling `Instance()` before `Init` throws. Calling `Init` when already initialized throws.
 
 For unit tests, **`DB::ResetForTest()`** tears down the singleton so another `Init` can run in the same process.
 
