@@ -55,7 +55,7 @@ archive_override(
         "https://ghproxy.net/https://github.com/bazel-contrib/bazel_features/releases/download/v1.28.0/bazel_features-v1.28.0.tar.gz",
         "https://github.com/bazel-contrib/bazel_features/releases/download/v1.28.0/bazel_features-v1.28.0.tar.gz",
     ],
-    patches = ["//third_party/registry_patches/bazel_features:module_dot_bazel_version.patch"],
+    patches = ["//third_party:bazel_features_module_dot_bazel_version.patch"],
     patch_strip = 1,
 )
 
