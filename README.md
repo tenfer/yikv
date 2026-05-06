@@ -5,7 +5,7 @@
 ## Repository layout
 
 - `src/alloc`: mmap / arena allocators
-- `src/container`: core containers (`HashMap`, `Bitmap`, `KVTable`, …)
+- `src/container`: core containers (`HashMap`, `Bitmap`, `List`, `Vector`, `String`, …); see [`src/container/README.md`](src/container/README.md) and [`src/container/USAGE.md`](src/container/USAGE.md)
 - `src/schema`: unified schema and document metadata
 - `src/index`: KV, inverted, and vector index interfaces and implementations
 - `src/config`: shared configuration helpers
