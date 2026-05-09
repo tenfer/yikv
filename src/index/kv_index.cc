@@ -9,8 +9,11 @@ KVIndex::KVIndex(alloc::Allocator*   alloc,
                  uint64_t docs_hdr_off,
                  uint32_t initial_docs_bucket_bits)
     : Index(alloc, schema) {
-    docs_ = std::make_unique<container::HashMap<std::string, uint64_t>>(
-        alloc_, docs_hdr_off, initial_docs_bucket_bits);
+    docs_ = std::make_unique<container::HashMap<
+        std::string, uint64_t,
+        std::hash<std::string>, std::equal_to<std::string>,
+        container::DefaultCodec<std::string>,
+        container::InlineU64Codec>>(alloc_, docs_hdr_off, initial_docs_bucket_bits);
 
     if (index_hdr_off != 0) {
         index_hdr_off_ = index_hdr_off;
@@ -46,6 +49,29 @@ std::string KVIndex::ExtractPk(const Doc& doc) const {
 
 void KVIndex::Put(Doc* doc) {
     std::string pk = ExtractPk(*doc);
+    docs_->put(pk, doc->slot_offset());
+    docs_->publish();
+}
+
+void KVIndex::BatchPut(const std::vector<Doc*>& docs) {
+    // Publish every kFlushEvery rows to bound CoW-node accumulation in
+    // retire_ (non-bulk mode) and to create crash-safety checkpoints.
+    constexpr size_t kFlushEvery = 50'000;
+    for (size_t i = 0; i < docs.size(); ++i) {
+        docs_->put(ExtractPk(*docs[i]), docs[i]->slot_offset());
+        if ((i + 1) % kFlushEvery == 0) {
+            docs_->publish();
+        }
+    }
+    docs_->publish();
+}
+
+void KVIndex::EnableBulkMode() {
+    docs_->enable_bulk_mode();
+}
+
+void KVIndex::Upsert(Doc* doc) {
+    std::string pk = ExtractPk(*doc);
 
     uint64_t old_off = 0;
     if (docs_->staged_get(pk, old_off)) {
@@ -56,7 +82,7 @@ void KVIndex::Put(Doc* doc) {
     docs_->publish();
 }
 
-void KVIndex::BatchPut(const std::vector<Doc*>& docs) {
+void KVIndex::BatchUpsert(const std::vector<Doc*>& docs) {
     for (Doc* d : docs) {
         std::string pk = ExtractPk(*d);
         uint64_t old_off = 0;

@@ -95,7 +95,7 @@ TEST_F(KVIndexTest, OverwriteUpdatesValue) {
     Doc d2 = idx.NewDoc();
     d2.put_int64(kFidUserId, 7);
     d2.put_int32(kFidAge,    30);
-    idx.Put(&d2);
+    idx.Upsert(&d2);
 
     EXPECT_EQ(idx.Size(), 1u);  // still one key "7"
 
@@ -221,7 +221,7 @@ TEST_F(KVIndexTest, UpsertReclaimMemoryTrend) {
         d.put_string(kFidName, "updated");
         d.array_append_int64(kFidClkList, i);
         d.array_append_int64(kFidClkList, i + 1);
-        idx.Put(&d);
+        idx.Upsert(&d);
     }
 
     auto stats_final = fast_alloc.GetStats();

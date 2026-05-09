@@ -130,7 +130,7 @@ void InvertedIndex::Put(Doc* doc) {
     if (Get(ExtractPk(*doc), &old_doc)) {
         DeindexDoc(old_doc);
     }
-    KVIndex::Put(doc);   // puts + publishes docs_
+    KVIndex::Upsert(doc);  // retire old slot in docs_ if PK existed
     IndexDoc(*doc);
     postings_->publish();
 }

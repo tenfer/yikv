@@ -844,6 +844,17 @@ struct FtAllocator::Impl {
     }
 };
 
+// Thread-local cache offsets are only valid for the FtAllocator that filled
+// them. Another arena on the same thread must flush the previous owner's cache
+// before Malloc/Free, or header_from_payload traverses the wrong mmap.
+thread_local FtAllocator* g_tlc_arena_owner = nullptr;
+
+static void ft_bind_tlc_owner(FtAllocator* a) {
+    if (g_tlc_arena_owner != nullptr && g_tlc_arena_owner != a)
+        g_tlc_arena_owner->FlushTlc();
+    g_tlc_arena_owner = a;
+}
+
 // ============================================================
 // FtAllocator – public interface
 // ============================================================
@@ -853,7 +864,12 @@ FtAllocator::FtAllocator(const AllocatorOptions& opts) : FtAllocator() {
     Open(opts);
 }
 
-FtAllocator::~FtAllocator() = default;
+FtAllocator::~FtAllocator() {
+    if (g_tlc_arena_owner == this) {
+        if (IsOpen()) FlushTlc();
+        g_tlc_arena_owner = nullptr;
+    }
+}
 FtAllocator::FtAllocator(FtAllocator&&) noexcept = default;
 FtAllocator& FtAllocator::operator=(FtAllocator&&) noexcept = default;
 
@@ -864,6 +880,10 @@ void FtAllocator::Open(const AllocatorOptions& opts) {
 
 void FtAllocator::Close() noexcept {
     if (impl_) {
+        if (g_tlc_arena_owner == this) {
+            FlushTlc();
+            g_tlc_arena_owner = nullptr;
+        }
         impl_->mapping.Close();
         impl_->meta = nullptr;
     }
@@ -879,6 +899,7 @@ void* FtAllocator::BaseAddress() const noexcept {
 
 void* FtAllocator::Malloc(std::size_t size) {
     if (!IsOpen()) throw std::runtime_error("allocator not open");
+    ft_bind_tlc_owner(this);
     const std::int32_t cid = impl_->find_class(size);
     void* ptr = (cid >= 0) ? impl_->malloc_small(size, static_cast<std::uint16_t>(cid))
                            : impl_->malloc_large(size);
@@ -889,6 +910,7 @@ void* FtAllocator::Malloc(std::size_t size) {
 void FtAllocator::Free(void* ptr, FreeMode mode) {
     if (!ptr) return;
     if (!IsOpen()) throw std::runtime_error("allocator not open");
+    ft_bind_tlc_owner(this);
 
     BlockHeader* hdr = impl_->header_from_payload(ptr);
     if (!(hdr->flags & kFlagAllocated))

@@ -77,7 +77,8 @@ std::string MakeTempDbRoot() {
 
 AllocatorOptions TestArenaOpts() {
     AllocatorOptions o;
-    o.arena_size = 64 * 1024 * 1024;
+    o.arena_size        = 64 * 1024 * 1024;
+    o.reclaim_delay_ns  = 0;  // immediate CoW retirement under churn
     return o;
 }
 
@@ -308,7 +309,7 @@ TEST_F(DBTest, UpsertSamePrimaryKeyReplacesRow) {
     d2.put_int64(kFidUserId, 1);
     d2.put_int32(kFidAge, 11);
     d2.put_string(kFidName, "v2");
-    idx->Put(&d2);
+    idx->Upsert(&d2);
     idx->Publish();
 
     Doc out;

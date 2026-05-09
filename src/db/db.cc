@@ -109,7 +109,8 @@ void DB::ResetForTest() {
     g_db.reset();
 }
 
-void DB::CreateKVIndex(std::string_view name, const schema::Schema& schema) {
+void DB::CreateKVIndex(std::string_view name, const schema::Schema& schema,
+                       uint32_t initial_docs_bucket_bits) {
     ValidateIndexName(name);
     std::lock_guard<std::mutex> lock(mu_);
 
@@ -139,7 +140,8 @@ void DB::CreateKVIndex(std::string_view name, const schema::Schema& schema) {
         slot->arena_lock = std::make_unique<ArenaExclusiveLock>(ArenaLockPath(name));
     }
     slot->alloc.Open(ArenaOptionsFor(name));
-    slot->kv = std::make_unique<index::KVIndex>(&slot->alloc, &slot->schema, 0, 0);
+    slot->kv = std::make_unique<index::KVIndex>(
+        &slot->alloc, &slot->schema, 0, 0, initial_docs_bucket_bits);
 
     IndexMeta meta;
     meta.kind            = IndexKind::KV;

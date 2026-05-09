@@ -23,11 +23,12 @@
 //
 // Directory layout (3-level tree, all offsets in arena)
 // ------------------------------------------------------
-//   HmRoot → HmDirChunk[256] → HmSegment[64] → HmBlock chain → Entry[]
+//   HmRoot → L1[] of leaf offsets → leaf[] of HmDirChunk offsets →
+//   HmSegment[64] → HmBlock chain → Entry[]
 //
-// Write amplification per put (default 4096 buckets)
-//   HmBlock (~48 B) + HmSegment (512 B) + HmDirChunk (512 B) + HmRoot (2 KB)
-//   ≈ 3 KB per mutation, regardless of map size.
+// Write amplification per put (v5): CoW HmRoot + one chunk-dir leaf
+//   (≤ kChunkDirLeafSlots×8) + L1 table (num_leaves×8) + segment + chunk +
+//   bucket chain — directory copy scales with O(dir_slots / kChunkDirLeafSlots).
 
 #include "src/alloc/allocator.h"
 
@@ -53,12 +54,16 @@ using FreeMode    = yikv::alloc::FreeMode;
 namespace hm_detail {
 
 constexpr uint32_t kMagic         = 0x4d485948u;  // "HYMH"
-constexpr uint16_t kVersion       = 1;
+constexpr uint16_t kVersion       =
+    5;  // v5: two-level chunk dir (L1 → leaves); v4 was flat uint64_t[slot]
 constexpr uint32_t kLocalBits     = 6;  // 64 buckets per segment
 constexpr uint32_t kSegBits       = 6;  // 64 segments per chunk
 constexpr uint32_t kBucketsPerSeg = 1u << kLocalBits;   // 64
 constexpr uint32_t kSegsPerChunk  = 1u << kSegBits;      // 64
-constexpr uint32_t kMaxDirChunks  = 256;
+// Max chunk *slots* in external directory = bucket_count >> 12 (min 1).
+// Need dir_slots >= 2^(bucket_bits-12) on rehash. bucket_bits=29 → 2^17 slots;
+// kMaxDirChunks caps dir size so max bucket_count ≈ kMaxDirChunks * 2^12 (~1B+ buckets).
+constexpr uint32_t kMaxDirChunks  = 262144;  // 2^18
 constexpr uint32_t kBlockCap      = 4;   // entries per HmBlock
 constexpr uint32_t kLoadFactor    = 2;   // rehash when entries > buckets * factor
 
@@ -136,15 +141,50 @@ struct alignas(8) HmHeader {
 };
 static_assert(sizeof(HmHeader) == 16);
 
-// Root block  (32-byte header + 256 × 8-byte chunk offsets = 2080 B) ────
+// Root (v5): chunk_dir_off → L1: uint64_t[num_leaves] → each 0 or offset to
+// leaf holding up to kChunkDirLeafSlots chunk pointers (HmDirChunk offsets).
 struct alignas(8) HmRoot {
     uint64_t entry_count;
     uint64_t bucket_count;   // always a power of 2
     uint32_t bucket_bits;    // log2(bucket_count)
-    uint32_t chunk_count;    // number of allocated HmDirChunk slots
-    uint64_t chunk_off[kMaxDirChunks];  // arena offsets → HmDirChunk
+    uint32_t chunk_count;    // high-water chunk index + 1 for iteration
+    uint64_t chunk_dir_off;  // L1 table: num_leaves pointers to leaves
 };
-static_assert(offsetof(HmRoot, chunk_off) == 24);
+static_assert(sizeof(HmRoot) == 32);
+
+// Chunk directory: L1 → leaves, each leaf has up to this many uint64_t slots.
+constexpr uint32_t kChunkDirLeafSlots = 256;
+
+inline uint32_t root_chunk_dir_slots(uint64_t bucket_count) noexcept {
+    uint64_t n = bucket_count >> (kLocalBits + kSegBits);
+    return static_cast<uint32_t>(n ? n : 1u);
+}
+
+inline uint32_t chunk_dir_num_leaves(uint32_t dir_slots) noexcept {
+    return (dir_slots + kChunkDirLeafSlots - 1u) / kChunkDirLeafSlots;
+}
+
+inline uint32_t chunk_dir_leaf_width(uint32_t leaf_i,
+                                     uint32_t dir_slots) noexcept {
+    const uint32_t base = leaf_i * kChunkDirLeafSlots;
+    uint32_t       rem  = dir_slots - base;
+    return rem < kChunkDirLeafSlots ? rem : kChunkDirLeafSlots;
+}
+
+inline uint64_t chunk_dir_get(const void* base, uint64_t l1_off,
+                              uint64_t chunk_idx, uint32_t dir_slots) noexcept {
+    if (!l1_off || chunk_idx >= dir_slots) return 0;
+    const uint32_t leaf_i =
+        static_cast<uint32_t>(chunk_idx / kChunkDirLeafSlots);
+    const auto* l1 = reinterpret_cast<const uint64_t*>(
+        static_cast<const char*>(base) + l1_off);
+    const uint64_t leaf = l1[leaf_i];
+    if (!leaf) return 0;
+    const uint32_t sub = static_cast<uint32_t>(chunk_idx - leaf_i * kChunkDirLeafSlots);
+    const auto* leaf_slots = reinterpret_cast<const uint64_t*>(
+        static_cast<const char*>(base) + leaf);
+    return leaf_slots[sub];
+}
 
 }  // namespace hm_detail
 
@@ -192,6 +232,19 @@ struct DefaultCodec<std::string> {
     static void retire(Allocator& a, uint64_t off) {
         a.Free(static_cast<char*>(a.BaseAddress()) + off, FreeMode::Delayed);
     }
+};
+
+// InlineU64Codec – stores a uint64_t value directly in HmBlobEntry::val_off,
+// eliminating any arena allocation for the value. val_len is set to 0 as
+// the "inline" sentinel. Use as the VCodec template argument for
+// HashMap<K, uint64_t, …> when K is non-trivially-copyable.
+// IMPORTANT: retire() is intentionally a no-op because val_off contains the
+// raw value, not an arena offset.
+struct InlineU64Codec {
+    static uint64_t encode(Allocator&, uint64_t v) noexcept { return v; }
+    static uint32_t encoded_len(uint64_t) noexcept { return 0; }
+    static uint64_t decode(const void*, uint64_t off, uint32_t) noexcept { return off; }
+    static void retire(Allocator&, uint64_t) noexcept {}
 };
 
 // ============================================================
@@ -285,7 +338,9 @@ class HashMap {
         if constexpr (!kInline) {
             const auto& be = static_cast<const hm_detail::HmBlobEntry&>(e);
             if (be.key_off) retire_.push_back(be.key_off);
-            if (be.val_off) retire_.push_back(be.val_off);
+            // val_len == 0 means value is stored inline in val_off (InlineU64Codec);
+            // do NOT treat val_off as an arena offset in that case.
+            if (be.val_off && be.val_len > 0) retire_.push_back(be.val_off);
         }
     }
 
@@ -406,18 +461,70 @@ class HashMap {
         return off_of(chunk);
     }
 
-    // CoW root: copy, update one chunk slot and entry count.
+    // CoW two-level chunk directory + new small root.
     uint64_t cow_root(uint64_t old_off, uint64_t chunk_idx,
                       uint64_t new_chunk, int64_t delta) {
-        void* mem  = alloc_->Malloc(sizeof(Root));
-        auto* r    = static_cast<Root*>(mem);
-        std::memcpy(r, at<Root>(old_off), sizeof(Root));
-        r->chunk_off[chunk_idx] = new_chunk;
+        const Root*    old   = at<Root>(old_off);
+        const uint32_t slots = hm_detail::root_chunk_dir_slots(old->bucket_count);
+        if (chunk_idx >= slots)
+            throw std::runtime_error("HashMap: chunk index out of range");
+
+        const uint32_t num_leaves = hm_detail::chunk_dir_num_leaves(slots);
+        const uint32_t leaf_i =
+            static_cast<uint32_t>(chunk_idx / hm_detail::kChunkDirLeafSlots);
+        const uint32_t sub = static_cast<uint32_t>(
+            chunk_idx - leaf_i * hm_detail::kChunkDirLeafSlots);
+
+        const uint64_t old_l1 = old->chunk_dir_off;
+        const uint64_t* old_l1_ptr =
+            old_l1 ? reinterpret_cast<const uint64_t*>(
+                         static_cast<const char*>(base_) + old_l1)
+                   : nullptr;
+        const uint64_t old_leaf = old_l1_ptr ? old_l1_ptr[leaf_i] : 0;
+        const uint32_t leaf_w =
+            hm_detail::chunk_dir_leaf_width(leaf_i, slots);
+
+        void* leaf_mem = alloc_->Malloc(
+            static_cast<std::size_t>(leaf_w) * sizeof(uint64_t));
+        auto* nl = static_cast<uint64_t*>(leaf_mem);
+        if (old_leaf) {
+            const auto* ol = reinterpret_cast<const uint64_t*>(
+                static_cast<const char*>(base_) + old_leaf);
+            std::memcpy(nl, ol,
+                        static_cast<std::size_t>(leaf_w) * sizeof(uint64_t));
+        } else {
+            std::memset(nl, 0,
+                        static_cast<std::size_t>(leaf_w) * sizeof(uint64_t));
+        }
+        nl[sub] = new_chunk;
+
+        void* l1_mem = alloc_->Malloc(
+            static_cast<std::size_t>(num_leaves) * sizeof(uint64_t));
+        auto* n1 = static_cast<uint64_t*>(l1_mem);
+        if (old_l1_ptr) {
+            std::memcpy(n1, old_l1_ptr,
+                        static_cast<std::size_t>(num_leaves) * sizeof(uint64_t));
+        } else {
+            std::memset(n1, 0,
+                        static_cast<std::size_t>(num_leaves) * sizeof(uint64_t));
+        }
+        n1[leaf_i] = off_of(nl);
+
+        void* rmem = alloc_->Malloc(sizeof(Root));
+        auto* r    = static_cast<Root*>(rmem);
         r->entry_count = static_cast<uint64_t>(
-            static_cast<int64_t>(r->entry_count) + delta);
-        if (chunk_idx >= r->chunk_count)
-            r->chunk_count = static_cast<uint32_t>(chunk_idx + 1);
+            static_cast<int64_t>(old->entry_count) + delta);
+        r->bucket_count = old->bucket_count;
+        r->bucket_bits  = old->bucket_bits;
+        uint32_t new_cc = old->chunk_count;
+        if (chunk_idx + 1u > new_cc)
+            new_cc = static_cast<uint32_t>(chunk_idx + 1);
+        r->chunk_count   = new_cc;
+        r->chunk_dir_off = off_of(n1);
+
         retire_.push_back(old_off);
+        if (old_l1) retire_.push_back(old_l1);
+        if (old_leaf) retire_.push_back(old_leaf);
         return off_of(r);
     }
 
@@ -426,7 +533,9 @@ class HashMap {
         const auto* root = at<Root>(staged_root_);
         auto idx = decompose(h, root);
 
-        uint64_t old_chunk = root->chunk_off[idx.chunk];
+        uint64_t old_chunk = hm_detail::chunk_dir_get(
+            base_, root->chunk_dir_off, idx.chunk,
+            hm_detail::root_chunk_dir_slots(root->bucket_count));
         uint64_t old_seg   = old_chunk
                                  ? at<DirChunk>(old_chunk)->seg_off[idx.seg] : 0;
         uint64_t old_bkt   = old_seg
@@ -442,9 +551,13 @@ class HashMap {
     // Iterate every live entry under a root (read-only, used by rehash).
     template <class Fn>
     void for_each_in_root(const Root* root, Fn&& fn) const {
+        const uint32_t dslots =
+            hm_detail::root_chunk_dir_slots(root->bucket_count);
         for (uint32_t ci = 0; ci < root->chunk_count; ++ci) {
-            if (!root->chunk_off[ci]) continue;
-            const auto* chunk = at<DirChunk>(root->chunk_off[ci]);
+            const uint64_t ch =
+                hm_detail::chunk_dir_get(base_, root->chunk_dir_off, ci, dslots);
+            if (!ch) continue;
+            const auto* chunk = at<DirChunk>(ch);
             for (uint32_t si = 0; si < hm_detail::kSegsPerChunk; ++si) {
                 if (!chunk->seg_off[si]) continue;
                 const auto* seg = at<Segment>(chunk->seg_off[si]);
@@ -464,9 +577,13 @@ class HashMap {
     void retire_root_tree(uint64_t root_off) {
         if (!root_off) return;
         const auto* root = at<Root>(root_off);
+        const uint32_t dslots =
+            hm_detail::root_chunk_dir_slots(root->bucket_count);
         for (uint32_t ci = 0; ci < root->chunk_count; ++ci) {
-            if (!root->chunk_off[ci]) continue;
-            const auto* chunk = at<DirChunk>(root->chunk_off[ci]);
+            const uint64_t ch =
+                hm_detail::chunk_dir_get(base_, root->chunk_dir_off, ci, dslots);
+            if (!ch) continue;
+            const auto* chunk = at<DirChunk>(ch);
             for (uint32_t si = 0; si < hm_detail::kSegsPerChunk; ++si) {
                 if (!chunk->seg_off[si]) continue;
                 const auto* seg = at<Segment>(chunk->seg_off[si]);
@@ -483,7 +600,18 @@ class HashMap {
                 }
                 retire_.push_back(chunk->seg_off[si]);
             }
-            retire_.push_back(root->chunk_off[ci]);
+            retire_.push_back(ch);
+        }
+        if (root->chunk_dir_off) {
+            const uint32_t slots =
+                hm_detail::root_chunk_dir_slots(root->bucket_count);
+            const uint32_t nl = hm_detail::chunk_dir_num_leaves(slots);
+            const auto* l1 = reinterpret_cast<const uint64_t*>(
+                static_cast<const char*>(base_) + root->chunk_dir_off);
+            for (uint32_t li = 0; li < nl; ++li) {
+                if (l1[li]) retire_.push_back(l1[li]);
+            }
+            retire_.push_back(root->chunk_dir_off);
         }
         retire_.push_back(root_off);
     }
@@ -499,12 +627,22 @@ class HashMap {
         if (new_chunk_n > hm_detail::kMaxDirChunks)
             throw std::overflow_error("HashMap: max bucket count exceeded");
 
+        const uint32_t new_slots = hm_detail::root_chunk_dir_slots(new_bkt_count);
+        const uint32_t new_leaves =
+            hm_detail::chunk_dir_num_leaves(new_slots);
+        void* dmem = alloc_->Malloc(static_cast<std::size_t>(new_leaves) *
+                                    sizeof(uint64_t));
+        std::memset(dmem, 0,
+                    static_cast<std::size_t>(new_leaves) * sizeof(uint64_t));
+
         // Fresh root for the new layout.
         void* mem      = alloc_->Malloc(sizeof(Root));
         auto* new_root = static_cast<Root*>(mem);
         std::memset(new_root, 0, sizeof(Root));
         new_root->bucket_count = new_bkt_count;
         new_root->bucket_bits  = new_bits;
+        new_root->chunk_count  = 0;
+        new_root->chunk_dir_off = off_of(dmem);
 
         uint64_t old_staged = staged_root_;
         staged_root_        = off_of(new_root);
@@ -516,6 +654,101 @@ class HashMap {
         });
 
         retire_root_tree(old_staged);
+    }
+
+    // ── Bulk-insert helpers (no CoW, no retire) ───────────────────────
+    // Update a slot in the two-level chunk directory in-place.
+    // If the leaf for leaf_i does not yet exist, it is allocated.
+    // Called only from do_put_bulk (single-writer, no concurrent readers).
+    void chunk_dir_set_inplace(uint64_t l1_off, uint64_t chunk_idx,
+                               uint32_t dir_slots, uint64_t new_chunk) {
+        const uint32_t leaf_i =
+            static_cast<uint32_t>(chunk_idx / hm_detail::kChunkDirLeafSlots);
+        const uint32_t sub =
+            static_cast<uint32_t>(chunk_idx % hm_detail::kChunkDirLeafSlots);
+        auto* l1 = reinterpret_cast<uint64_t*>(static_cast<char*>(base_) + l1_off);
+        if (!l1[leaf_i]) {
+            const uint32_t lw = hm_detail::chunk_dir_leaf_width(leaf_i, dir_slots);
+            void* lm = alloc_->Malloc(static_cast<std::size_t>(lw) * sizeof(uint64_t));
+            std::memset(lm, 0, static_cast<std::size_t>(lw) * sizeof(uint64_t));
+            l1[leaf_i] = off_of(lm);
+        }
+        auto* leaf = reinterpret_cast<uint64_t*>(static_cast<char*>(base_) + l1[leaf_i]);
+        leaf[sub] = new_chunk;
+    }
+
+    // Insert-only, in-place put. Caller guarantees:
+    //   (a) No concurrent readers.
+    //   (b) Key k does not already exist in the map.
+    // Does NOT CoW any directory node; allocates new nodes when needed.
+    // Does NOT add anything to retire_.
+    void do_put_bulk(uint64_t h, const K& k, const V& v) {
+        auto* root = at<Root>(staged_root_);
+        auto  idx  = decompose(h, root);
+
+        const uint32_t dir_slots =
+            hm_detail::root_chunk_dir_slots(root->bucket_count);
+
+        // Chunk: get or allocate in-place.
+        uint64_t chunk_off = hm_detail::chunk_dir_get(
+            base_, root->chunk_dir_off, idx.chunk, dir_slots);
+        if (!chunk_off) {
+            void* mem = alloc_->Malloc(sizeof(DirChunk));
+            std::memset(mem, 0, sizeof(DirChunk));
+            chunk_off = off_of(mem);
+            chunk_dir_set_inplace(root->chunk_dir_off, idx.chunk,
+                                  dir_slots, chunk_off);
+            const uint32_t nc = static_cast<uint32_t>(idx.chunk + 1);
+            if (nc > root->chunk_count) root->chunk_count = nc;
+        }
+        auto* chunk = at<DirChunk>(chunk_off);
+
+        // Segment: get or allocate in-place.
+        uint64_t seg_off = chunk->seg_off[idx.seg];
+        if (!seg_off) {
+            void* mem = alloc_->Malloc(sizeof(Segment));
+            std::memset(mem, 0, sizeof(Segment));
+            seg_off = off_of(mem);
+            chunk->seg_off[idx.seg] = seg_off;
+        }
+        auto* seg = at<Segment>(seg_off);
+
+        // Bucket block chain: insert entry in-place.
+        uint64_t bkt_off = seg->bkt_off[idx.local];
+        if (!bkt_off) {
+            // Fresh bucket: allocate first block.
+            void* mem = alloc_->Malloc(blk_alloc_sz());
+            auto* blk = static_cast<Block*>(mem);
+            blk->count       = 1;
+            blk->capacity    = hm_detail::kBlockCap;
+            blk->entry_bytes = static_cast<uint32_t>(sizeof(Entry));
+            blk->next        = 0;
+            make_entry(blk_entries(blk)[0], h, k, v);
+            seg->bkt_off[idx.local] = off_of(blk);
+        } else {
+            // Walk chain to find block with space; link new block if all full.
+            uint64_t cur = bkt_off, prev = 0;
+            while (cur) {
+                auto* blk = at<Block>(cur);
+                if (blk->count < hm_detail::kBlockCap) {
+                    make_entry(blk_entries(blk)[blk->count], h, k, v);
+                    ++blk->count;
+                    ++root->entry_count;
+                    return;
+                }
+                prev = cur;
+                cur  = blk->next;
+            }
+            void* mem = alloc_->Malloc(blk_alloc_sz());
+            auto* blk = static_cast<Block*>(mem);
+            blk->count       = 1;
+            blk->capacity    = hm_detail::kBlockCap;
+            blk->entry_bytes = static_cast<uint32_t>(sizeof(Entry));
+            blk->next        = 0;
+            make_entry(blk_entries(blk)[0], h, k, v);
+            at<Block>(prev)->next = off_of(blk);
+        }
+        ++root->entry_count;
     }
 
     static uint64_t hm_steady_ns() noexcept {
@@ -541,6 +774,10 @@ class HashMap {
     };
     std::vector<RetiredBatch> retired_batches_;
 
+    // When true, put() uses do_put_bulk() (no CoW, no retire_).
+    // ONLY safe when there are no concurrent readers (e.g., bulk import).
+    bool bulk_mode_ = false;
+
 public:
     // ============================================================
     // Snapshot — lock-free reader view
@@ -556,7 +793,11 @@ public:
             uint64_t si   = (bidx >> hm_detail::kLocalBits) &
                             (hm_detail::kSegsPerChunk - 1);
             uint64_t li   = bidx & (hm_detail::kBucketsPerSeg - 1);
-            uint64_t co   = root_->chunk_off[ci];   if (!co) return 0;
+            const uint32_t dslots =
+                hm_detail::root_chunk_dir_slots(root_->bucket_count);
+            uint64_t co = hm_detail::chunk_dir_get(base_, root_->chunk_dir_off,
+                                                    ci, dslots);
+            if (!co) return 0;
             uint64_t so   = hm_detail::at<DirChunk>(base_, co)->seg_off[si];
             if (!so) return 0;
             return hm_detail::at<Segment>(base_, so)->bkt_off[li];
@@ -610,9 +851,14 @@ public:
         template <class Fn>
         void for_each(Fn&& fn) const {
             if (!root_) return;
+            const uint32_t dslots =
+                hm_detail::root_chunk_dir_slots(root_->bucket_count);
             for (uint32_t ci = 0; ci < root_->chunk_count; ++ci) {
-                if (!root_->chunk_off[ci]) continue;
-                const auto* chunk = hm_detail::at<DirChunk>(base_, root_->chunk_off[ci]);
+                const uint64_t ch =
+                    hm_detail::chunk_dir_get(base_, root_->chunk_dir_off, ci,
+                                            dslots);
+                if (!ch) continue;
+                const auto* chunk = hm_detail::at<DirChunk>(base_, ch);
                 for (uint32_t si = 0; si < hm_detail::kSegsPerChunk; ++si) {
                     if (!chunk->seg_off[si]) continue;
                     const auto* seg = hm_detail::at<Segment>(base_, chunk->seg_off[si]);
@@ -656,8 +902,16 @@ public:
             const auto* hdr = at<hm_detail::HmHeader>(hdr_off);
             if (hdr->magic   != hm_detail::kMagic)
                 throw std::runtime_error("HashMap: bad magic on recovery");
-            if (hdr->version != hm_detail::kVersion)
+            if (hdr->version != hm_detail::kVersion) {
+                if (hdr->version >= 1 && hdr->version < hm_detail::kVersion) {
+                    throw std::runtime_error(
+                        "HashMap: older on-disk map format (v" +
+                        std::to_string(static_cast<int>(hdr->version)) +
+                        "); v5+ two-level chunk directory — remove index directory, "
+                        "recreate, and re-import");
+                }
                 throw std::runtime_error("HashMap: unsupported version");
+            }
             hdr_off_     = hdr_off;
             staged_root_ = hdr->root_off;
         } else {
@@ -668,14 +922,24 @@ public:
             if (chunk_count > hm_detail::kMaxDirChunks)
                 throw std::invalid_argument("HashMap: too many buckets requested");
 
+            const uint32_t dir_slots =
+                hm_detail::root_chunk_dir_slots(bucket_count);
+            const uint32_t num_leaves =
+                hm_detail::chunk_dir_num_leaves(dir_slots);
+            void* dmem = alloc_->Malloc(static_cast<std::size_t>(num_leaves) *
+                                        sizeof(uint64_t));
+            std::memset(dmem, 0,
+                        static_cast<std::size_t>(num_leaves) * sizeof(uint64_t));
+
             // Allocate the initial (empty) HmRoot.
             void* rmem = alloc_->Malloc(sizeof(Root));
             auto* r    = static_cast<Root*>(rmem);
             std::memset(r, 0, sizeof(Root));
-            r->entry_count  = 0;
-            r->bucket_count = bucket_count;
-            r->bucket_bits  = bucket_bits;
-            r->chunk_count  = 0;
+            r->entry_count   = 0;
+            r->bucket_count  = bucket_count;
+            r->bucket_bits   = bucket_bits;
+            r->chunk_count   = 0;
+            r->chunk_dir_off = off_of(dmem);
             staged_root_ = off_of(r);
 
             // Allocate the stable HmHeader pointing to this root.
@@ -714,7 +978,9 @@ public:
         if (!root || !root->entry_count) return false;
         uint64_t h   = Hash{}(k);
         auto     idx = decompose(h, root);
-        uint64_t old_chunk = root->chunk_off[idx.chunk];
+        uint64_t old_chunk = hm_detail::chunk_dir_get(
+            base_, root->chunk_dir_off, idx.chunk,
+            hm_detail::root_chunk_dir_slots(root->bucket_count));
         if (!old_chunk) return false;
         uint64_t old_seg = at<DirChunk>(old_chunk)->seg_off[idx.seg];
         if (!old_seg)   return false;
@@ -733,15 +999,30 @@ public:
         return false;
     }
 
+    // Enable in-place bulk-insert mode.
+    // ONLY call this when there are zero concurrent readers (e.g., offline import).
+    // In this mode put() modifies the directory in-place (no CoW, no retire_),
+    // which eliminates ~1 KB of temporary allocation per insert.
+    void enable_bulk_mode() noexcept { bulk_mode_ = true; }
+
     // Insert or update key → value.  Does NOT publish.
     void put(const K& k, const V& v) {
         const auto* root = at<Root>(staged_root_);
         if (root->entry_count >=
             root->bucket_count * hm_detail::kLoadFactor) {
+            // Rehash is always CoW-safe; temporarily leave bulk mode so
+            // rehash uses the normal path, then restore.
+            const bool was_bulk = bulk_mode_;
+            bulk_mode_ = false;
             rehash();
+            bulk_mode_ = was_bulk;
         }
-        bool inserted = false;
-        do_put(Hash{}(k), k, v, inserted);
+        if (bulk_mode_) {
+            do_put_bulk(Hash{}(k), k, v);
+        } else {
+            bool inserted = false;
+            do_put(Hash{}(k), k, v, inserted);
+        }
     }
 
     // Remove key.  Returns true if the key was present.  Does NOT publish.
@@ -750,7 +1031,9 @@ public:
         const auto* root = at<Root>(staged_root_);
         auto idx      = decompose(h, root);
 
-        uint64_t old_chunk = root->chunk_off[idx.chunk];
+        uint64_t old_chunk = hm_detail::chunk_dir_get(
+            base_, root->chunk_dir_off, idx.chunk,
+            hm_detail::root_chunk_dir_slots(root->bucket_count));
         if (!old_chunk) return false;
         uint64_t old_seg = at<DirChunk>(old_chunk)->seg_off[idx.seg];
         if (!old_seg)   return false;

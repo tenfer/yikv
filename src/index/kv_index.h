@@ -42,9 +42,19 @@ public:
     // Allocate a new Doc in the arena with a fresh sequential doc_id.
     Doc NewDoc();
 
-    // Upsert doc by primary key.
+    // Insert-only: *doc's primary key must not already exist. No map read or
+    // retirement of a prior slot (call Upsert for replace semantics).
     virtual void Put(Doc* doc);
     void BatchPut(const std::vector<Doc*>& docs);
+
+    // Replace-or-insert: retires any existing row for the same PK, then stores *doc.
+    void Upsert(Doc* doc);
+    void BatchUpsert(const std::vector<Doc*>& docs);
+
+    // Enable in-place bulk-insert mode on the underlying HashMap.
+    // ONLY call when there are no concurrent readers (e.g., offline import tool).
+    // Eliminates CoW directory overhead per Put/BatchPut.
+    void EnableBulkMode();
 
     // Fill *out with an attached Doc if pk exists; returns false otherwise.
     bool Get(std::string_view pk, Doc* out) const;
@@ -70,7 +80,13 @@ protected:
     uint32_t    NextDocId();
 
     uint64_t                index_hdr_off_;
-    std::unique_ptr<container::HashMap<std::string, uint64_t>> docs_;
+    // Value (doc arena offset) is stored inline in HmBlobEntry::val_off — no
+    // extra arena allocation per entry, saving ~32 bytes × N entries.
+    std::unique_ptr<container::HashMap<
+        std::string, uint64_t,
+        std::hash<std::string>, std::equal_to<std::string>,
+        container::DefaultCodec<std::string>,
+        container::InlineU64Codec>> docs_;
 };
 
 }  // namespace index

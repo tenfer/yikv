@@ -21,6 +21,8 @@ namespace index {
 //   Fixed scalar (int64/double) : a = value as uint64,                b = 0
 //   String                      : a = byte_len,        b = arena_off -> char data
 //   Array                       : a = elem_count,      b = arena_off -> [uint64 cap | elem data...]
+//   String array                : a = elem count,      b = arena_off -> [uint64 cap | uint32 n |
+//                                 uint32_t lens[n] | concatenated string bytes] (same a semantics as numeric arrays)
 //
 // Field access uses field_id as the slot index; match getters/setters to the schema type.
 //
@@ -77,6 +79,10 @@ public:
 
     double   array_get_double  (uint32_t fid, uint32_t i) const;
     void     array_put_double  (uint32_t fid, const double* data, uint32_t count);
+
+    std::string_view array_get_string(uint32_t fid, uint32_t i) const;
+    void             array_put_string(uint32_t fid, const std::string_view* parts,
+                                     uint32_t      count);
 
 private:
     struct DocHeader {

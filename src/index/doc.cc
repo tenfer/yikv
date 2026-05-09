@@ -262,6 +262,64 @@ void Doc::array_put_double(uint32_t fid, const double* data, uint32_t count) {
     array_put_impl<double>(fid, data, count);
 }
 
+void Doc::array_put_string(uint32_t fid, const std::string_view* parts, uint32_t count) {
+    Slot& s = slot(fid);
+    if (s.b != 0) {
+        alloc_->Free(alloc_->OffsetToPtr(s.b), alloc::FreeMode::Delayed);
+    }
+    if (!parts || count == 0) {
+        s.a = 0;
+        s.b = 0;
+        return;
+    }
+    size_t sum = 0;
+    for (uint32_t i = 0; i < count; ++i) sum += parts[i].size();
+
+    uint64_t cap = static_cast<uint64_t>(count) * 12 / 10;
+    if (cap < count) cap = count;
+    if (cap == 0) cap = 1;
+
+    const size_t header = sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint32_t) * static_cast<size_t>(count);
+    const size_t bytes  = header + sum;
+    void*        mem    = alloc_->Malloc(bytes);
+    std::memset(mem, 0, bytes);
+    std::memcpy(mem, &cap, sizeof(uint64_t));
+    size_t               off  = sizeof(uint64_t);
+    std::memcpy(reinterpret_cast<char*>(mem) + off, &count, sizeof(uint32_t));
+    off += sizeof(uint32_t);
+    uint32_t* lens = reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(mem) + off);
+    off += sizeof(uint32_t) * static_cast<size_t>(count);
+    char* payload = reinterpret_cast<char*>(mem) + off;
+    size_t p = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        lens[i] = static_cast<uint32_t>(parts[i].size());
+        if (!parts[i].empty()) {
+            std::memcpy(payload + p, parts[i].data(), parts[i].size());
+            p += parts[i].size();
+        }
+    }
+    s.a = count;
+    s.b = alloc_->PtrToOffset(mem);
+}
+
+std::string_view Doc::array_get_string(uint32_t fid, uint32_t i) const {
+    uint32_t n = array_size(fid);
+    if (i >= n || n == 0) return {};
+    uint64_t blob_off = slot(fid).b;
+    if (blob_off == 0) return {};
+    const char* base = reinterpret_cast<const char*>(alloc_->OffsetToPtr(blob_off));
+    uint32_t    count;
+    std::memcpy(&count, base + sizeof(uint64_t), sizeof(uint32_t));
+    if (i >= count) return {};
+    const uint32_t* lens =
+        reinterpret_cast<const uint32_t*>(base + sizeof(uint64_t) + sizeof(uint32_t));
+    const size_t payload_off =
+        sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint32_t) * static_cast<size_t>(count);
+    size_t pos = 0;
+    for (uint32_t j = 0; j < i; ++j) pos += lens[j];
+    return std::string_view(base + payload_off + pos, lens[i]);
+}
+
 template int32_t* Doc::array_data<int32_t>(uint32_t) const;
 template int64_t* Doc::array_data<int64_t>(uint32_t) const;
 template float*   Doc::array_data<float>  (uint32_t) const;
