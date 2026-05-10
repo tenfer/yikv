@@ -7,6 +7,10 @@
 namespace yikv {
 namespace alloc {
 
+// Read reserved virtual size from an existing arena file (offset 0 header).
+// Returns false if the file is missing or not a v3 FtAllocator arena.
+bool PeekFtArenaReservedBytes(const std::string& arena_path, std::uint64_t* out_reserved);
+
 class FtAllocator : public Allocator {
 public:
     FtAllocator();

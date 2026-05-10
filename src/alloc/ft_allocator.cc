@@ -23,27 +23,36 @@ namespace {
 // ============================================================
 // Constants
 // ============================================================
-constexpr std::uint64_t kMagic        = 0x4654414c4c4f4332ull;  // FTALLOC2
-constexpr std::uint32_t kVersion      = 2;
+constexpr std::uint64_t kMagic        = 0x4654414c4c4f4333ull;  // FTALLOC3
+constexpr std::uint32_t kVersion      = 3;
 constexpr std::uint16_t kLargeClassId = 0xFFFFu;
-constexpr std::uint32_t kBlockMagic   = 0x4642414c;             // FBAL
+constexpr std::uint16_t kBlockMagic   = 0x4642u;  // 'FB' — 2-byte sentinel (v3)
 constexpr std::uint16_t kFlagAllocated = 1u << 0;
 constexpr std::uint16_t kFlagDelayed   = 1u << 1;
 constexpr std::size_t   kMaxSizeClasses = 64;
 
-// --- Block layout ---
-// Every block:
-//   [0, 16)  BlockHeader  (magic, class_id, flags, block_size, page_count)
-//   [16, …)  Payload      (user data when allocated; FreeChain when free)
+// --- Block layout (v3) ---
 //
-// This shrinks the header overhead vs v1 (48→16 bytes), which halves the
-// minimum allocatable size and greatly improves small-object density.
-constexpr std::size_t kHeaderSize   = 16;
-constexpr std::size_t kFreeChainSize = 16;  // sizeof(FreeChain)
-constexpr std::size_t kMinBlockSize = kHeaderSize + kFreeChainSize;  // 32 B
+// Small object  (class_id != kLargeClassId):
+//   [0,  8)  BlockHeader  (8 B: magic u16, class_id u16, flags u16, pad u16)
+//   [8,  …)  Payload      (user data; ImmediateChain/DelayedChain when free)
+//
+// Large object  (class_id == kLargeClassId, always page-aligned):
+//   [0,  8)  LargeExt     (8 B: page_count u32, reserved u32)
+//   [8, 16)  BlockHeader  (8 B: same layout, class_id == kLargeClassId)
+//   [16, …)  Payload      (user data; DelayedChain when delayed-freed)
+//
+// Halves small-object header overhead (16 → 8 B) vs v2 and reduces
+// size-class step from 16 → 8 B, cutting internal fragmentation for
+// short strings (PK keys) by up to 50 %.
+constexpr std::size_t kHeaderSize    = 8;   // sizeof(BlockHeader)
+constexpr std::size_t kLargeExtSize  = 8;   // sizeof(LargeExt)
+constexpr std::size_t kLargeHdrSize  = kLargeExtSize + kHeaderSize;  // 16 B
+constexpr std::size_t kFreeChainSize = 16;  // sizeof(DelayedChain) — worst case
+constexpr std::size_t kMinBlockSize  = kHeaderSize + kFreeChainSize; // 24 B
 
 // Size-class ranges
-constexpr std::size_t kTinyStep      = 16;    // step in the tiny range
+constexpr std::size_t kTinyStep      = 8;     // was 16 in v2; finer with 8-B header
 constexpr std::size_t kMaxTinyTotal  = 320;   // highest tiny block_size (B)
 constexpr std::uint32_t kDefaultSlabPages = 4;  // pages per slab fill
 constexpr std::size_t kTlcCapacity  = 32;    // thread-local cache depth / class
@@ -52,16 +61,26 @@ constexpr std::size_t kTlcCapacity  = 32;    // thread-local cache depth / class
 // Persistent block structures (stored inside the mmap arena)
 // ============================================================
 
-// BlockHeader – 16 bytes, sits at the very start of every block.
+// BlockHeader – 8 bytes.
+// Sits at offset 0 for small blocks, at offset kLargeExtSize for large blocks.
+// Payload (user data / free-chain) starts immediately after.
 struct BlockHeader {
-    std::uint32_t magic;       // kBlockMagic — corruption guard
-    std::uint16_t class_id;    // size-class index, or kLargeClassId
-    std::uint16_t flags;       // kFlagAllocated | kFlagDelayed
-    std::uint32_t block_size;  // total block bytes (header + payload)
-    std::uint32_t page_count;  // large: pages occupied; small/middle: 0
+    std::uint16_t magic;    // kBlockMagic — corruption guard
+    std::uint16_t class_id; // size-class index, or kLargeClassId
+    std::uint16_t flags;    // kFlagAllocated | kFlagDelayed
+    std::uint16_t pad;      // reserved, always 0
 };
 static_assert(sizeof(BlockHeader) == kHeaderSize,
-              "BlockHeader must be exactly 16 bytes");
+              "BlockHeader must be exactly 8 bytes");
+
+// LargeExt – 8 bytes.
+// Sits immediately before BlockHeader in every large allocation (at base+0).
+// Not present for small allocations.
+struct LargeExt {
+    std::uint32_t page_count; // pages this allocation occupies
+    std::uint32_t reserved;   // always 0
+};
+static_assert(sizeof(LargeExt) == kLargeExtSize);
 
 // Returns nanoseconds since an arbitrary fixed point (steady_clock).
 inline std::uint64_t steady_ns() noexcept {
@@ -69,17 +88,33 @@ inline std::uint64_t steady_ns() noexcept {
         std::chrono::steady_clock::now().time_since_epoch().count());
 }
 
-// FreeChain – stored in the PAYLOAD region of a FREE block.
-// (Payload and FreeChain share the same location; they're mutually exclusive.)
-struct FreeChain {
-    std::uint64_t next_offset;   // arena offset of next free block (0 = end)
-    std::uint64_t free_time_ns;  // steady_clock nanoseconds when block was deferred
+// ImmediateChain – 8 bytes stored in the PAYLOAD of a block on the immediate
+// freelist.  Payload and chain share the same location (mutually exclusive).
+struct ImmediateChain {
+    std::uint64_t next_offset;  // arena offset of next free block (0 = end)
 };
-static_assert(sizeof(FreeChain) == kFreeChainSize);
+static_assert(sizeof(ImmediateChain) == 8);
 
-inline FreeChain* get_free_chain(BlockHeader* hdr) noexcept {
-    return reinterpret_cast<FreeChain*>(
+// DelayedChain – 16 bytes stored in the PAYLOAD of a block on the delayed-free
+// list.  Sets the minimum block size to 24 B (8-B header + 16-B chain).
+struct DelayedChain {
+    std::uint64_t next_offset;   // arena offset of next delayed block (0 = end)
+    std::uint64_t free_time_ns;  // steady_clock ns when block was deferred
+};
+static_assert(sizeof(DelayedChain) == kFreeChainSize);
+
+inline ImmediateChain* get_imm_chain(BlockHeader* hdr) noexcept {
+    return reinterpret_cast<ImmediateChain*>(
         reinterpret_cast<char*>(hdr) + kHeaderSize);
+}
+inline DelayedChain* get_del_chain(BlockHeader* hdr) noexcept {
+    return reinterpret_cast<DelayedChain*>(
+        reinterpret_cast<char*>(hdr) + kHeaderSize);
+}
+// LargeExt immediately precedes BlockHeader for large allocations.
+inline LargeExt* large_ext_of(BlockHeader* hdr) noexcept {
+    return reinterpret_cast<LargeExt*>(
+        reinterpret_cast<char*>(hdr) - kLargeExtSize);
 }
 
 // Per size-class metadata in the arena header.
@@ -157,7 +192,7 @@ struct ConditionalLock {
 // ============================================================
 std::vector<std::uint32_t> BuildSizeClasses(std::uint32_t page_size) {
     std::vector<std::uint32_t> v;
-    // Tiny: 32, 48, 64, …, 320  (step 16)
+    // Tiny: 24, 32, 40, …, 320  (step 8; finer than v2's step-16)
     for (std::uint32_t s = kMinBlockSize; s <= kMaxTinyTotal; s += kTinyStep)
         v.push_back(s);
     // Middle
@@ -170,7 +205,7 @@ std::vector<std::uint32_t> BuildSizeClasses(std::uint32_t page_size) {
 }
 
 // O(1) tiny-range lookup.
-// tiny classes: block_size = 32, 48, 64 … = kMinBlockSize + i*kTinyStep
+// tiny classes: block_size = 24, 32, 40 … = kMinBlockSize + i*kTinyStep  (i=0,1,…)
 // For total_needed (= kHeaderSize + user_size) in [kHeaderSize+1, kMaxTinyTotal]:
 //   class_id = ceil((total_needed - kMinBlockSize) / kTinyStep)
 //            = (total_needed - kMinBlockSize + kTinyStep - 1) / kTinyStep
@@ -366,13 +401,33 @@ struct FtAllocator::Impl {
         mapping.Open(opts);
         meta = reinterpret_cast<AllocatorMetadata*>(mapping.data());
 
+        // Detect incompatible arena formats and reject rather than silently
+        // overwriting.  Users must recreate the index and re-import.
+        if (meta->magic != 0 && meta->magic != kMagic) {
+            throw std::runtime_error(
+                "FtAllocator: arena has an unrecognised magic value; "
+                "recreate the index directory and re-import");
+        }
+        if (meta->magic == kMagic && meta->version != kVersion) {
+            throw std::runtime_error(
+                "FtAllocator: incompatible arena version (on-disk v" +
+                std::to_string(meta->version) + ", code expects v" +
+                std::to_string(kVersion) + "); "
+                "recreate the index directory and re-import");
+        }
+
         // Reopen existing arena
         if (meta->magic == kMagic && meta->version == kVersion) {
             class_sizes = BuildSizeClasses(meta->page_size);
             if (meta->arena_size != mapping.size() ||
                 meta->class_count != static_cast<std::uint32_t>(class_sizes.size()))
                 throw std::runtime_error(
-                    "existing allocator metadata does not match requested layout");
+                    std::string("existing allocator metadata does not match requested layout: ") +
+                    "on_disk_arena_size=" + std::to_string(meta->arena_size) +
+                    " mapped_virtual_size=" + std::to_string(mapping.size()) +
+                    " class_count_disk=" + std::to_string(meta->class_count) +
+                    " class_count_code=" + std::to_string(class_sizes.size()) +
+                    " (often: config arena_max_gb smaller than import; raise arena_max_gb)");
             // Discard stale TLC entries from any previous allocator on this thread.
             for (auto& slot : tl_cache.slots) slot.count = 0;
 
@@ -579,22 +634,21 @@ struct FtAllocator::Impl {
         meta->free_page_count += count;
     }
 
-    // ---- Freelist helpers (use FreeChain inside payload, P1) ------------
+    // ---- Freelist helpers (ImmediateChain / DelayedChain in payload) ----
     void push_free(SizeClassMeta& klass, BlockHeader* hdr,
                    std::uint16_t class_id) noexcept {
         hdr->flags    = 0;
         hdr->class_id = class_id;
-        auto* fc = get_free_chain(hdr);
-        fc->next_offset = klass.free_head;
-        fc->free_time_ns = 0;
+        auto* ic = get_imm_chain(hdr);
+        ic->next_offset = klass.free_head;
         klass.free_head = ptr_to_offset(hdr);
     }
 
     BlockHeader* pop_free(SizeClassMeta& klass) noexcept {
         if (!klass.free_head) return nullptr;
         auto* hdr       = header_at(klass.free_head);
-        klass.free_head = get_free_chain(hdr)->next_offset;
-        get_free_chain(hdr)->next_offset = 0;
+        klass.free_head = get_imm_chain(hdr)->next_offset;
+        get_imm_chain(hdr)->next_offset = 0;
         return hdr;
     }
 
@@ -614,8 +668,7 @@ struct FtAllocator::Impl {
             auto* hdr = reinterpret_cast<BlockHeader*>(
                 base() + slab_offset + i * klass.block_size);
             *hdr = BlockHeader{};
-            hdr->magic      = kBlockMagic;
-            hdr->block_size = klass.block_size;
+            hdr->magic = kBlockMagic;
             push_free(klass, hdr, class_id);
         }
     }
@@ -630,9 +683,8 @@ struct FtAllocator::Impl {
         while (slot.count) {
             std::uint64_t off = slot.offsets[--slot.count];
             auto* hdr = header_at(off);
-            auto* fc  = get_free_chain(hdr);
-            fc->next_offset = klass.free_head;
-            fc->free_time_ns = 0;
+            auto* ic  = get_imm_chain(hdr);
+            ic->next_offset = klass.free_head;
             hdr->flags      = 0;
             klass.free_head = off;
         }
@@ -641,16 +693,16 @@ struct FtAllocator::Impl {
     // ---- Small / middle allocation (with TLC) ---------------------------
     void* malloc_small(std::size_t /*size*/, std::uint16_t class_id) {
         TlcSlot& slot = tl_cache.slots[class_id];
+        const std::uint32_t bsz = meta->classes[class_id].block_size;
 
         // Fast path: TLC hit (no lock).
         if (slot.count) {
             std::uint64_t off = slot.offsets[--slot.count];
             auto* hdr = header_at(off);
-            hdr->flags         = kFlagAllocated;
-            hdr->class_id      = class_id;
-            hdr->block_size    = meta->classes[class_id].block_size;
+            hdr->flags    = kFlagAllocated;
+            hdr->class_id = class_id;
             stat_alloc_count.fetch_add(1, std::memory_order_relaxed);
-            stat_used_bytes.fetch_add(hdr->block_size, std::memory_order_relaxed);
+            stat_used_bytes.fetch_add(bsz, std::memory_order_relaxed);
             return reinterpret_cast<char*>(hdr) + kHeaderSize;
         }
 
@@ -663,7 +715,7 @@ struct FtAllocator::Impl {
             while (n < kTlcCapacity / 2 && klass.free_head) {
                 slot.offsets[slot.count++] = klass.free_head;
                 auto* hdr       = header_at(klass.free_head);
-                klass.free_head = get_free_chain(hdr)->next_offset;
+                klass.free_head = get_imm_chain(hdr)->next_offset;
                 ++n;
             }
         }
@@ -671,29 +723,29 @@ struct FtAllocator::Impl {
 
         std::uint64_t off = slot.offsets[--slot.count];
         auto* hdr = header_at(off);
-        hdr->magic         = kBlockMagic;
-        hdr->flags         = kFlagAllocated;
-        hdr->class_id      = class_id;
-        hdr->block_size    = klass.block_size;
-        hdr->page_count    = 0;
+        hdr->magic    = kBlockMagic;
+        hdr->flags    = kFlagAllocated;
+        hdr->class_id = class_id;
+        hdr->pad      = 0;
         stat_alloc_count.fetch_add(1, std::memory_order_relaxed);
-        stat_used_bytes.fetch_add(hdr->block_size, std::memory_order_relaxed);
+        stat_used_bytes.fetch_add(bsz, std::memory_order_relaxed);
         return reinterpret_cast<char*>(hdr) + kHeaderSize;
     }
 
     void* malloc_large(std::size_t size) {
         const std::uint64_t total =
-            AlignUp(kHeaderSize + size, meta->page_size);
+            AlignUp(kLargeHdrSize + size, meta->page_size);
         const std::uint64_t pages = total / meta->page_size;
         const std::uint64_t off   = alloc_pages(pages);
-        auto* hdr = reinterpret_cast<BlockHeader*>(base() + off);
-        *hdr = BlockHeader{};
-        hdr->magic      = kBlockMagic;
-        hdr->class_id   = kLargeClassId;
-        hdr->flags      = kFlagAllocated;
-        hdr->block_size = static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(total, std::numeric_limits<std::uint32_t>::max()));
-        hdr->page_count = static_cast<std::uint32_t>(pages);
+        // Layout: [LargeExt 8B][BlockHeader 8B][payload …]
+        auto* ext = reinterpret_cast<LargeExt*>(base() + off);
+        ext->page_count = static_cast<std::uint32_t>(pages);
+        ext->reserved   = 0;
+        auto* hdr = reinterpret_cast<BlockHeader*>(base() + off + kLargeExtSize);
+        hdr->magic    = kBlockMagic;
+        hdr->class_id = kLargeClassId;
+        hdr->flags    = kFlagAllocated;
+        hdr->pad      = 0;
         stat_alloc_count.fetch_add(1, std::memory_order_relaxed);
         stat_used_bytes.fetch_add(total, std::memory_order_relaxed);
         return reinterpret_cast<char*>(hdr) + kHeaderSize;
@@ -702,8 +754,9 @@ struct FtAllocator::Impl {
     // ---- Immediate free --------------------------------------------------
     void free_small_immediate(BlockHeader* hdr) {
         const std::uint16_t class_id = hdr->class_id;
+        const std::uint32_t bsz = meta->classes[class_id].block_size;
         stat_free_count.fetch_add(1, std::memory_order_relaxed);
-        stat_used_bytes.fetch_sub(hdr->block_size, std::memory_order_relaxed);
+        stat_used_bytes.fetch_sub(bsz, std::memory_order_relaxed);
 
         // Try TLC first (no lock).
         TlcSlot& slot = tl_cache.slots[class_id];
@@ -720,10 +773,9 @@ struct FtAllocator::Impl {
             const std::uint32_t flush = kTlcCapacity / 2;
             for (std::uint32_t i = 0; i < flush; ++i) {
                 std::uint64_t o = slot.offsets[--slot.count];
-                auto* h   = header_at(o);
-                auto* fc  = get_free_chain(h);
-                fc->next_offset = klass.free_head;
-                fc->free_time_ns = 0;
+                auto* h  = header_at(o);
+                auto* ic = get_imm_chain(h);
+                ic->next_offset = klass.free_head;
                 h->flags        = 0;
                 klass.free_head = o;
             }
@@ -733,58 +785,61 @@ struct FtAllocator::Impl {
     }
 
     void free_large_immediate(BlockHeader* hdr) {
-        const std::uint64_t pages = hdr->page_count;
-        const std::uint64_t off   = ptr_to_offset(hdr);
+        auto* ext = large_ext_of(hdr);
+        const std::uint64_t pages    = ext->page_count;
+        const std::uint64_t base_off = ptr_to_offset(
+            reinterpret_cast<char*>(hdr) - kLargeExtSize);
         stat_free_count.fetch_add(1, std::memory_order_relaxed);
-        stat_used_bytes.fetch_sub(
-            static_cast<std::uint64_t>(pages) * meta->page_size,
-            std::memory_order_relaxed);
+        stat_used_bytes.fetch_sub(pages * meta->page_size,
+                                  std::memory_order_relaxed);
         hdr->flags = 0;
-        free_pages(off, pages);
+        free_pages(base_off, pages);
     }
 
     // ---- Delayed free (time-based) --------------------------------------
     void free_small_delayed(BlockHeader* hdr) {
         const std::uint16_t class_id = hdr->class_id;
+        const std::uint32_t bsz = meta->classes[class_id].block_size;
         const std::uint64_t ts = steady_ns();
 
         SizeClassMeta& klass = meta->classes[class_id];
         ConditionalLock guard(class_mutexes[class_id], concurrent);
         hdr->flags = kFlagDelayed;
-        auto* fc = get_free_chain(hdr);
-        fc->next_offset  = 0;
-        fc->free_time_ns = ts;
+        auto* dc = get_del_chain(hdr);
+        dc->next_offset  = 0;
+        dc->free_time_ns = ts;
         const std::uint64_t off = ptr_to_offset(hdr);
         if (!klass.delayed_tail) {
             klass.delayed_head = off;
         } else {
-            get_free_chain(header_at(klass.delayed_tail))->next_offset = off;
+            get_del_chain(header_at(klass.delayed_tail))->next_offset = off;
         }
         klass.delayed_tail = off;
         stat_free_count.fetch_add(1, std::memory_order_relaxed);
         stat_delayed_count.fetch_add(1, std::memory_order_relaxed);
-        stat_used_bytes.fetch_sub(hdr->block_size, std::memory_order_relaxed);
+        stat_used_bytes.fetch_sub(bsz, std::memory_order_relaxed);
     }
 
     void free_large_delayed(BlockHeader* hdr) {
         const std::uint64_t ts = steady_ns();
+        auto* ext = large_ext_of(hdr);
 
         ConditionalLock guard(large_delay_mutex, concurrent);
         hdr->flags = kFlagDelayed;
-        auto* fc = get_free_chain(hdr);
-        fc->next_offset  = 0;
-        fc->free_time_ns = ts;
+        auto* dc = get_del_chain(hdr);
+        dc->next_offset  = 0;
+        dc->free_time_ns = ts;
         const std::uint64_t off = ptr_to_offset(hdr);
         if (!meta->delayed_large_tail) {
             meta->delayed_large_head = off;
         } else {
-            get_free_chain(header_at(meta->delayed_large_tail))->next_offset = off;
+            get_del_chain(header_at(meta->delayed_large_tail))->next_offset = off;
         }
         meta->delayed_large_tail = off;
         stat_free_count.fetch_add(1, std::memory_order_relaxed);
         stat_delayed_count.fetch_add(1, std::memory_order_relaxed);
         stat_used_bytes.fetch_sub(
-            static_cast<std::uint64_t>(hdr->page_count) * meta->page_size,
+            static_cast<std::uint64_t>(ext->page_count) * meta->page_size,
             std::memory_order_relaxed);
     }
 
@@ -803,9 +858,9 @@ struct FtAllocator::Impl {
             ConditionalLock guard(class_mutexes[cid], concurrent);
             while (klass.delayed_head) {
                 auto* hdr = header_at(klass.delayed_head);
-                auto* fc  = get_free_chain(hdr);
-                if (fc->free_time_ns > cutoff) break;
-                klass.delayed_head = fc->next_offset;
+                auto* dc  = get_del_chain(hdr);
+                if (dc->free_time_ns > cutoff) break;
+                klass.delayed_head = dc->next_offset;
                 if (!klass.delayed_head) klass.delayed_tail = 0;
                 push_free(klass, hdr, cid);
                 stat_delayed_count.fetch_sub(1, std::memory_order_relaxed);
@@ -818,16 +873,17 @@ struct FtAllocator::Impl {
             ConditionalLock guard(large_delay_mutex, concurrent);
             while (meta->delayed_large_head) {
                 auto* hdr = header_at(meta->delayed_large_head);
-                auto* fc  = get_free_chain(hdr);
-                if (fc->free_time_ns > cutoff) break;
-                const std::uint64_t next = fc->next_offset;
-                const std::uint64_t off  = ptr_to_offset(hdr);
+                auto* dc  = get_del_chain(hdr);
+                if (dc->free_time_ns > cutoff) break;
+                auto* ext = large_ext_of(hdr);
+                const std::uint64_t next     = dc->next_offset;
+                const std::uint64_t base_off = ptr_to_offset(
+                    reinterpret_cast<char*>(hdr) - kLargeExtSize);
                 meta->delayed_large_head = next;
                 if (!next) meta->delayed_large_tail = 0;
                 hdr->flags = 0;
-                fc->next_offset = 0;
                 stat_delayed_count.fetch_sub(1, std::memory_order_relaxed);
-                free_pages(off, hdr->page_count);
+                free_pages(base_off, ext->page_count);
                 ++reclaimed;
             }
         }
@@ -1011,6 +1067,29 @@ void FtAllocator::CheckConsistency() const {
     }
     if (fp != impl_->meta->free_page_count)
         throw std::runtime_error("page bitmap diverged from free_page_count");
+}
+
+bool PeekFtArenaReservedBytes(const std::string& arena_path, std::uint64_t* out_reserved) {
+    if (!out_reserved) return false;
+    int fd = ::open(arena_path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    // Binary layout at file start must match AllocatorMetadata (v3).
+    std::uint64_t magic = 0;
+    std::uint32_t version = 0;
+    std::uint32_t page_size = 0;
+    std::uint64_t arena_size = 0;
+    bool          ok = true;
+    ok = ok && ::pread(fd, &magic, sizeof(magic), 0) == static_cast<ssize_t>(sizeof(magic));
+    ok = ok && ::pread(fd, &version, sizeof(version), 8) == static_cast<ssize_t>(sizeof(version));
+    ok = ok && ::pread(fd, &page_size, sizeof(page_size), 12) == static_cast<ssize_t>(sizeof(page_size));
+    ok = ok && ::pread(fd, &arena_size, sizeof(arena_size), 16) == static_cast<ssize_t>(sizeof(arena_size));
+    ::close(fd);
+    if (!ok) return false;
+    constexpr std::uint64_t kPeekMagic   = 0x4654414c4c4f4333ull;  // FTALLOC3
+    constexpr std::uint32_t kPeekVersion = 3;
+    if (magic != kPeekMagic || version != kPeekVersion) return false;
+    *out_reserved = arena_size;
+    return true;
 }
 
 }  // namespace alloc

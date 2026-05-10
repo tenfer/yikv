@@ -25,6 +25,21 @@ constexpr const char kMetaFile[]   = "index.meta.json";
 constexpr const char kArenaBase[]       = "arena";
 constexpr const char kArenaLockFile[] = "arena.lock";
 
+std::uint64_t SumArenaDiskBytes(const std::string& arena_base_path) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::uint64_t   sum = 0;
+    if (fs::exists(arena_base_path, ec) && fs::is_regular_file(arena_base_path, ec)) {
+        sum += static_cast<std::uint64_t>(fs::file_size(arena_base_path, ec));
+    }
+    for (std::uint64_t seg = 1;; ++seg) {
+        const std::string p = arena_base_path + ".seg" + std::to_string(seg);
+        if (!fs::exists(p, ec) || !fs::is_regular_file(p, ec)) break;
+        sum += static_cast<std::uint64_t>(fs::file_size(p, ec));
+    }
+    return sum;
+}
+
 }  // namespace
 
 struct DB::IndexSlot {
@@ -148,6 +163,8 @@ void DB::CreateKVIndex(std::string_view name, const schema::Schema& schema,
     meta.index_hdr_off   = slot->kv->index_hdr_offset();
     meta.docs_hdr_off    = slot->kv->docs_root_offset();
     meta.posting_hdr_off = 0;
+    meta.record_count    = 0;
+    meta.arena_bytes     = SumArenaDiskBytes(ArenaPath(n));
     AtomicWriteFile(MetaPath(name), SerializeIndexMeta(meta));
 
     indexes_.emplace(n, std::move(slot));
@@ -193,9 +210,38 @@ void DB::CreateInvertedIndex(std::string_view name, const schema::Schema& schema
     meta.index_hdr_off   = slot->inv->index_hdr_offset();
     meta.docs_hdr_off    = slot->inv->docs_root_offset();
     meta.posting_hdr_off = slot->inv->posting_root_offset();
+    meta.record_count    = 0;
+    meta.arena_bytes     = SumArenaDiskBytes(ArenaPath(n));
     AtomicWriteFile(MetaPath(name), SerializeIndexMeta(meta));
 
     indexes_.emplace(n, std::move(slot));
+}
+
+void DB::PersistIndexMeta(std::string_view name) {
+    ValidateIndexName(name);
+    std::lock_guard<std::mutex> lock(mu_);
+    const std::string n(name);
+    auto              it = indexes_.find(n);
+    if (it == indexes_.end())
+        throw std::runtime_error("DB::PersistIndexMeta: unknown index: " + n);
+
+    IndexSlot* slot = it->second.get();
+    IndexMeta  meta;
+    meta.arena_bytes = SumArenaDiskBytes(ArenaPath(n));
+    if (slot->kind == IndexSlot::Kind::KV) {
+        meta.kind            = IndexKind::KV;
+        meta.index_hdr_off   = slot->kv->index_hdr_offset();
+        meta.docs_hdr_off    = slot->kv->docs_root_offset();
+        meta.posting_hdr_off = 0;
+        meta.record_count    = static_cast<std::uint64_t>(slot->kv->Size());
+    } else {
+        meta.kind            = IndexKind::Inverted;
+        meta.index_hdr_off   = slot->inv->index_hdr_offset();
+        meta.docs_hdr_off    = slot->inv->docs_root_offset();
+        meta.posting_hdr_off = slot->inv->posting_root_offset();
+        meta.record_count    = static_cast<std::uint64_t>(slot->inv->Size());
+    }
+    AtomicWriteFile(MetaPath(n), SerializeIndexMeta(meta));
 }
 
 void DB::OpenIndex(std::string_view name) {
@@ -224,7 +270,13 @@ void DB::OpenIndex(std::string_view name) {
     if (exclusive_arena_lock_) {
         slot->arena_lock = std::make_unique<ArenaExclusiveLock>(ArenaLockPath(name));
     }
-    slot->alloc.Open(ArenaOptionsFor(name));
+    alloc::AllocatorOptions arena_opts = ArenaOptionsFor(name);
+    std::uint64_t           on_disk_reserved = 0;
+    if (alloc::PeekFtArenaReservedBytes(ArenaPath(n), &on_disk_reserved) &&
+        on_disk_reserved > arena_opts.max_arena_size) {
+        arena_opts.max_arena_size = on_disk_reserved;
+    }
+    slot->alloc.Open(arena_opts);
 
     switch (meta.kind) {
         case IndexKind::KV:

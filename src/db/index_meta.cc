@@ -84,6 +84,11 @@ bool LoadIndexMeta(const std::string& json, IndexMeta* out, std::string* err) {
     out->index_hdr_off   = ih;
     out->docs_hdr_off    = dh;
     out->posting_hdr_off = ph;
+    out->record_count    = 0;
+    out->arena_bytes     = 0;
+    std::uint64_t        v = 0;
+    if (ParseU64Field(json, "record_count", &v)) out->record_count = v;
+    if (ParseU64Field(json, "arena_bytes", &v)) out->arena_bytes = v;
     return true;
 }
 
@@ -93,7 +98,9 @@ std::string SerializeIndexMeta(const IndexMeta& m) {
        << "  \"kind\": \"" << IndexKindName(m.kind) << "\",\n"
        << "  \"index_hdr_off\": " << m.index_hdr_off << ",\n"
        << "  \"docs_hdr_off\": " << m.docs_hdr_off << ",\n"
-       << "  \"posting_hdr_off\": " << m.posting_hdr_off << "\n"
+       << "  \"posting_hdr_off\": " << m.posting_hdr_off << ",\n"
+       << "  \"record_count\": " << m.record_count << ",\n"
+       << "  \"arena_bytes\": " << m.arena_bytes << "\n"
        << "}\n";
     return os.str();
 }
