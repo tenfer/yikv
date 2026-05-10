@@ -295,6 +295,12 @@ void DB::OpenIndex(std::string_view name) {
     indexes_.emplace(n, std::move(slot));
 }
 
+void DB::CloseIndex(std::string_view name) {
+    ValidateIndexName(name);
+    std::lock_guard<std::mutex> lock(mu_);
+    indexes_.erase(std::string(name));
+}
+
 index::KVIndex* DB::GetKVIndex(std::string_view name) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = indexes_.find(std::string(name));

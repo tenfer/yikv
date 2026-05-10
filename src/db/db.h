@@ -49,6 +49,9 @@ public:
     // Load an on-disk index into this process (no-op if already open).
     void OpenIndex(std::string_view name);
 
+    // Close a loaded index (munmap, release arena lock). No-op if not open.
+    void CloseIndex(std::string_view name);
+
     // Rewrite index.meta.json from the in-memory index (doc count, arena file sizes, hdr offsets).
     void PersistIndexMeta(std::string_view name);
 

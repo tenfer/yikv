@@ -286,6 +286,21 @@ TEST_F(DBTest, OpenIndexIdempotent) {
     ASSERT_TRUE(idx->Get("3", &out));
 }
 
+TEST_F(DBTest, CloseIndexThenReopen) {
+    DB::Instance().CreateKVIndex("main", kv_schema_);
+    KVIndex* idx = DB::Instance().GetKVIndex("main");
+    Doc      d   = idx->NewDoc();
+    d.put_int64(kFidUserId, 9);
+    idx->Put(&d);
+    idx->Publish();
+
+    DB::Instance().CloseIndex("main");
+    DB::Instance().OpenIndex("main");
+    idx = DB::Instance().GetKVIndex("main");
+    Doc out;
+    ASSERT_TRUE(idx->Get("9", &out));
+}
+
 // ─── KV rows: upsert, delete, batch, miss, string PK ───────────────────────────
 
 TEST_F(DBTest, GetMissReturnsFalse) {
