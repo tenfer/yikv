@@ -1,6 +1,7 @@
 #include "src/index/doc.h"
 
 #include <cstring>
+#include <vector>
 
 namespace yikv {
 namespace index {
@@ -254,12 +255,34 @@ float Doc::array_get_float(uint32_t fid, uint32_t i) const {
 void Doc::array_put_float(uint32_t fid, const float* data, uint32_t count) {
     array_put_impl<float>(fid, data, count);
 }
+void Doc::array_append_float(uint32_t fid, float val) {
+    array_append_impl<float>(fid, val);
+}
 
 double Doc::array_get_double(uint32_t fid, uint32_t i) const {
     return array_data<double>(fid)[i];
 }
 void Doc::array_put_double(uint32_t fid, const double* data, uint32_t count) {
     array_put_impl<double>(fid, data, count);
+}
+void Doc::array_append_double(uint32_t fid, double val) {
+    array_append_impl<double>(fid, val);
+}
+
+void Doc::array_append_string(uint32_t fid, std::string_view part) {
+    const uint32_t n = array_size(fid);
+    if (n == 0 && part.empty()) return;
+    std::vector<std::string>      owned;
+    std::vector<std::string_view> views;
+    owned.reserve(static_cast<size_t>(n) + 1);
+    views.reserve(static_cast<size_t>(n) + 1);
+    for (uint32_t i = 0; i < n; ++i) {
+        owned.emplace_back(array_get_string(fid, i));
+        views.push_back(owned.back());
+    }
+    owned.emplace_back(part);
+    views.push_back(owned.back());
+    array_put_string(fid, views.data(), static_cast<uint32_t>(views.size()));
 }
 
 void Doc::array_put_string(uint32_t fid, const std::string_view* parts, uint32_t count) {
@@ -332,6 +355,8 @@ template void Doc::array_put_impl<double> (uint32_t, const double*,  uint32_t);
 
 template void Doc::array_append_impl<int32_t>(uint32_t, int32_t);
 template void Doc::array_append_impl<int64_t>(uint32_t, int64_t);
+template void Doc::array_append_impl<float>  (uint32_t, float);
+template void Doc::array_append_impl<double> (uint32_t, double);
 
 }  // namespace index
 }  // namespace yikv

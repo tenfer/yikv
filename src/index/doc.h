@@ -76,13 +76,16 @@ public:
 
     float    array_get_float   (uint32_t fid, uint32_t i) const;
     void     array_put_float   (uint32_t fid, const float* data, uint32_t count);
+    void     array_append_float(uint32_t fid, float val);
 
     double   array_get_double  (uint32_t fid, uint32_t i) const;
     void     array_put_double  (uint32_t fid, const double* data, uint32_t count);
+    void     array_append_double(uint32_t fid, double val);
 
     std::string_view array_get_string(uint32_t fid, uint32_t i) const;
     void             array_put_string(uint32_t fid, const std::string_view* parts,
                                      uint32_t      count);
+    void             array_append_string(uint32_t fid, std::string_view part);
 
 private:
     struct DocHeader {

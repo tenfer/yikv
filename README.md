@@ -31,7 +31,7 @@ Other OS or CPU (e.g. **`bazelisk-linux-arm64`**): download the matching binary 
 - **Bazel** (required): builds go through **Bazel** only; the repo pins **7.4.1** in [`.bazelversion`](.bazelversion) (installed Bazelisk will download that release on first run).
 - **C++17 toolchain**: GCC or Clang with `ar` / `ranlib`. `make bundle-lib` and `install` link `libyikv.so` with **`g++`** unless you set **`CXX`**.
 - **Bash**: `Makefile` **`install-headers`** relies on Bash (`read -d ''`); **`SHELL := /bin/bash`** is assumed.
-- **Network** (first build): Dependencies resolve via **Bazel Central Registry** and two custom **`--registry=`** sources for **babylon** / **secretflow** (see [`bazel/registries/default.bazelrc`](bazel/registries/default.bazelrc)). Default is **GitHub direct** (`raw.githubusercontent.com`). **`MODULE.bazel` tarball URLs** (**`brpc`**, **`bazel_features`**) try **GitHub Releases first**, then **`ghproxy.net`** as fallback. Inside mainland China, use **`make GHPROXY=1 …`** so Makefile (and **`scripts/bundle-libyikv.sh`** when **`YIKV_BAZEL_GHPROXY=1`** is set) load [`bazel/registries/ghproxy.bazelrc`](bazel/registries/ghproxy.bazelrc) instead of the default registry file. For **`bazel`** without Make: `bazel --noworkspace_rc --bazelrc=bazel/registries/ghproxy.bazelrc --bazelrc=bazel/buildflags.bazelrc build //…`. Plain **`bazel build`** with only the workspace [`.bazelrc`](.bazelrc) uses **direct** registries by default.
+- **Network** (first build / vendor refresh): Dependencies resolve via **Bazel Central Registry** and two custom **`--registry=`** sources for **babylon** / **secretflow** (see [`bazel/registries/default.bazelrc`](bazel/registries/default.bazelrc)). Default is **GitHub direct** (`raw.githubusercontent.com`). **`MODULE.bazel` tarball URLs** (**`brpc`**, **`bazel_features`**) try **GitHub Releases first**, then **`ghproxy.net`** as fallback. Inside mainland China, use **`make GHPROXY=1 …`** so Makefile (and **`scripts/bundle-libyikv.sh`** when **`YIKV_BAZEL_GHPROXY=1`** is set) load [`bazel/registries/ghproxy.bazelrc`](bazel/registries/ghproxy.bazelrc) instead of the default registry file. For **`bazel`** without Make: `bazel --noworkspace_rc --bazelrc=bazel/registries/ghproxy.bazelrc --bazelrc=bazel/vendor.bazelrc --bazelrc=bazel/buildflags.bazelrc build //…`. Plain **`bazel build`** with the workspace [`.bazelrc`](.bazelrc) uses the committed Bzlmod [`vendor/`](vendor/) directory by default.
 
 Convenience targets (`make all`, `make install`) still invoke Bazel under the hood—you need a working **`bazel`** on `PATH`.
 
@@ -47,6 +47,18 @@ make clean
 make test
 make check        # same tests, Bazel -c dbg
 ```
+
+## Bzlmod vendor
+
+This repository uses Bazel's official Bzlmod vendor mode: external repositories are materialized under [`vendor/`](vendor/) and normal Bazel commands use it through [`bazel/vendor.bazelrc`](bazel/vendor.bazelrc). This makes day-to-day builds work without repeatedly downloading from GitHub / registry URLs.
+
+```bash
+bazel build //src/index:kv_index
+bazel build --config=vendor_offline //src/index:kv_index   # fail if anything tries to download
+./tools/bazel_vendor.sh                                    # refresh vendor/ after MODULE.bazel changes
+```
+
+`bazel vendor` may still need network and, for transitive `rules_python` toolchain repos, is safer from a non-root developer account. The checked-in `vendor/` is the source distributed with the project; refresh it only when external dependencies change.
 
 ## Install
 

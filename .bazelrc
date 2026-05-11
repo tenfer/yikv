@@ -1,4 +1,5 @@
 # Module registries: GitHub-direct by default (`bazel/registries/default.bazelrc`).
 # For ghproxy: `make GHPROXY=1 <target>` or `export YIKV_BAZEL_GHPROXY=1` (see Makefile / scripts/bundle-libyikv.sh).
 import %workspace%/bazel/registries/default.bazelrc
+import %workspace%/bazel/vendor.bazelrc
 import %workspace%/bazel/buildflags.bazelrc
