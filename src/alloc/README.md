@@ -145,6 +145,8 @@
 
 ## 并发与内存序
 
+`AllocatorOptions.mode` **默认为 `AllocatorMode::Concurrent`**（多线程安全 `Malloc`/`Free`）。单进程单写、追求最低分配开销时可显式设为 **`SingleWriter`**。
+
 分配器支持两种模式：
 
 - `AllocatorMode::Concurrent`

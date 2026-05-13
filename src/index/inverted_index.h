@@ -7,13 +7,13 @@
 #include <vector>
 
 #include "src/container/bitmap.h"
-#include "src/container/hashmap.h"
+#include "src/container/concurrent_hashmap.h"
 #include "src/index/kv_index.h"
 
 namespace yikv {
 namespace index {
 
-// Inverted index backed by KVIndex (doc store) plus a posting-list HashMap.
+// Inverted index backed by KVIndex (doc store) plus a posting-list ConcurrentHashMap.
 //
 // Inherits all KV storage from KVIndex and overrides Put/Delete to
 // maintain per-term Bitmap posting lists for every field that has
@@ -22,7 +22,7 @@ namespace index {
 // Posting map: (field_id + "#" + normalized_term) -> bitmap_root_offset
 //
 // Recovery offsets (in addition to KVIndex's):
-//   posting_hdr_off : arena offset of the postings HashMap root.
+//   posting_hdr_off : arena offset of the postings ConcurrentHashMap head region.
 
 class InvertedIndex : public KVIndex {
 public:
@@ -30,7 +30,9 @@ public:
                            const schema::Schema* schema,
                            uint64_t index_hdr_off   = 0,
                            uint64_t docs_hdr_off    = 0,
-                           uint64_t posting_hdr_off = 0);
+                           uint64_t posting_hdr_off = 0,
+                           uint32_t initial_docs_bucket_bits = 15,
+                           uint8_t  chm_stripe_shift         = 6);
 
     // Upsert doc and update all is_index posting lists.
     void Put(Doc* doc) override;
@@ -68,7 +70,7 @@ private:
     static std::string              Normalize  (std::string_view s);
 
     // field_id#term -> bitmap root_offset
-    std::unique_ptr<container::HashMap<std::string, uint64_t>> postings_;
+    std::unique_ptr<container::ConcurrentHashMap<std::string, uint64_t>> postings_;
 };
 
 }  // namespace index

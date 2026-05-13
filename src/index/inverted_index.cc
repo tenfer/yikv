@@ -10,10 +10,14 @@ InvertedIndex::InvertedIndex(alloc::Allocator*   alloc,
                              const schema::Schema* schema,
                              uint64_t index_hdr_off,
                              uint64_t docs_hdr_off,
-                             uint64_t posting_hdr_off)
-    : KVIndex(alloc, schema, index_hdr_off, docs_hdr_off) {
-    postings_ = std::make_unique<container::HashMap<std::string, uint64_t>>(
-        alloc_, posting_hdr_off, 15);
+                             uint64_t posting_hdr_off,
+                             uint32_t initial_docs_bucket_bits,
+                             uint8_t  chm_stripe_shift)
+    : KVIndex(alloc, schema, index_hdr_off, docs_hdr_off,
+              initial_docs_bucket_bits, chm_stripe_shift) {
+    // Posting map: separate table; keep 2^15 default buckets (matches prior HashMap).
+    postings_ = std::make_unique<container::ConcurrentHashMap<std::string, uint64_t>>(
+        alloc_, posting_hdr_off, 15u, chm_stripe_shift);
 }
 
 // ── Text helpers ─────────────────────────────────────────────────────────────
@@ -49,9 +53,8 @@ std::string InvertedIndex::PostingKey(uint16_t field_id, std::string_view term) 
 void InvertedIndex::AddToPosting(uint16_t field_id, std::string_view term,
                                  uint32_t doc_id) {
     const std::string pkey = PostingKey(field_id, term);
-    auto snap = postings_->acquire_snapshot();
     uint64_t off = 0;
-    if (snap.get(pkey, off)) {
+    if (postings_->get(pkey, off)) {
         container::Bitmap bm(alloc_, off);
         bm.Add(doc_id);
     } else {
@@ -64,9 +67,8 @@ void InvertedIndex::AddToPosting(uint16_t field_id, std::string_view term,
 void InvertedIndex::RemoveFromPosting(uint16_t field_id, std::string_view term,
                                       uint32_t doc_id) {
     const std::string pkey = PostingKey(field_id, term);
-    auto snap = postings_->acquire_snapshot();
     uint64_t off = 0;
-    if (!snap.get(pkey, off)) return;
+    if (!postings_->get(pkey, off)) return;
     container::Bitmap bm(alloc_, off);
     bm.Remove(doc_id);
     if (bm.IsEmpty()) {
@@ -132,16 +134,14 @@ void InvertedIndex::Put(Doc* doc) {
     }
     KVIndex::Upsert(doc);  // retire old slot in docs_ if PK existed
     IndexDoc(*doc);
-    postings_->publish();
 }
 
 bool InvertedIndex::Delete(std::string_view pk) {
     Doc old_doc;
     if (Get(pk, &old_doc)) {
         DeindexDoc(old_doc);
-        postings_->publish();
     }
-    return KVIndex::Delete(pk);  // erases + publishes docs_
+    return KVIndex::Delete(pk);  // erases docs_
 }
 
 // ── Query ─────────────────────────────────────────────────────────────────────
@@ -150,9 +150,8 @@ bool InvertedIndex::Query(uint16_t field_id, std::string_view term,
                           container::Bitmap* out) const {
     if (!out) return false;
     const std::string pkey = PostingKey(field_id, term);
-    auto snap = postings_->acquire_snapshot();
     uint64_t off = 0;
-    if (!snap.get(pkey, off)) return false;
+    if (!postings_->get(pkey, off)) return false;
     *out = container::Bitmap(alloc_, off);
     return true;
 }
@@ -195,11 +194,10 @@ container::Bitmap InvertedIndex::QueryOr(uint16_t field_id,
 
 void InvertedIndex::Publish() {
     KVIndex::Publish();
-    postings_->publish();
 }
 
 uint64_t InvertedIndex::posting_root_offset() const noexcept {
-    return postings_->root_offset();
+    return postings_->head_region_offset();
 }
 
 }  // namespace index

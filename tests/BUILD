@@ -17,6 +17,18 @@ cc_binary(
     ],
 )
 
+cc_binary(
+    name = "hash_vs_concurrent_benchmark",
+    srcs = ["hash_vs_concurrent_benchmark.cc"],
+    copts = ["-std=c++17"],
+    deps = [
+        "//src/alloc:ft_allocator",
+        "//src/container:concurrent_hashmap",
+        "//src/container:hashmap",
+        "@google_benchmark//:benchmark_main",
+    ],
+)
+
 # DB layer: temp-dir lifecycle, CreateKVIndex / OpenIndex, cold recovery scan.
 # Run: bazel run -c opt //tests:db_benchmark -- --benchmark_min_time=0.1s
 cc_binary(
@@ -104,6 +116,18 @@ cc_test(
 )
 
 cc_test(
+    name = "concurrent_hashmap_test",
+    size = "small",
+    srcs = ["concurrent_hashmap_test.cc"],
+    copts = ["-std=c++17"],
+    deps = [
+        "//src/alloc:ft_allocator",
+        "//src/container:concurrent_hashmap",
+        "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "string_test",
     size = "small",
     srcs = ["string_test.cc"],
@@ -147,6 +171,7 @@ test_suite(
         ":kv_index_test",
         ":inverted_index_test",
         ":bitmap_test",
+        ":concurrent_hashmap_test",
         ":hashmap_test",
         ":string_test",
         ":vector_test",

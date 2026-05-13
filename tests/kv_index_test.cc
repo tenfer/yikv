@@ -2,11 +2,15 @@
 #include "src/alloc/ft_allocator.h"
 #include "src/schema/schema.h"
 
+#include "src/alloc/allocator.h"
+
 #include <gtest/gtest.h>
 
 #include <string>
+#include <thread>
 #include <vector>
 
+using yikv::alloc::AllocatorMode;
 using yikv::alloc::AllocatorOptions;
 using yikv::alloc::FtAllocator;
 using yikv::index::Doc;
@@ -188,6 +192,48 @@ TEST_F(KVIndexTest, RecoverFromOffsets) {
         ASSERT_TRUE(recovered.Get("1", &out));
         EXPECT_EQ(out.get_int64(kFidUserId), 1);
         EXPECT_EQ(out.get_string(kFidName), "Bob");
+    }
+}
+
+TEST(KVIndexConcurrentTest, NewDocPutGetMultiThreaded) {
+    FtAllocator alloc;
+    AllocatorOptions opts;
+    opts.arena_size       = 64 * 1024 * 1024;
+    opts.mode             = AllocatorMode::Concurrent;
+    opts.reclaim_delay_ns = 0;
+    alloc.Open(opts);
+
+    Schema schema;
+    std::string err;
+    ASSERT_TRUE(schema.LoadJson(kTestSchemaJson, &err)) << err;
+
+    KVIndex idx(&alloc, &schema);
+    constexpr int kThreads   = 4;
+    constexpr int kPerThread = 500;
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<std::size_t>(kThreads));
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t] {
+            const int base = t * kPerThread;
+            for (int i = 0; i < kPerThread; ++i) {
+                Doc d = idx.NewDoc();
+                const int64_t uid = static_cast<int64_t>(base + i);
+                d.put_int64(kFidUserId, uid);
+                d.put_int32(kFidAge,    20 + (base + i) % 100);
+                idx.Put(&d);
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    EXPECT_EQ(idx.Size(), static_cast<std::size_t>(kThreads * kPerThread));
+    for (int t = 0; t < kThreads; ++t) {
+        for (int i = 0; i < kPerThread; ++i) {
+            const int64_t uid = static_cast<int64_t>(t * kPerThread + i);
+            Doc           out;
+            ASSERT_TRUE(idx.Get(std::to_string(uid), &out));
+            EXPECT_EQ(out.get_int64(kFidUserId), uid);
+        }
     }
 }
 

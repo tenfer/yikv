@@ -39,6 +39,7 @@ Convenience targets (`make all`, `make install`) still invoke Bazel under the ho
 
 ```bash
 bazel build //... && bazel test //tests:all_tests
+bazel build //:libyikv    # one merged libyikv.so (cc_shared_library; same role as bundle merge)
 
 make all          # tools + tests + lib merge → bazel-bin/libyikv.{a,so}
 make GHPROXY=1 all   # optional: babylon/secretflow registry JSON via ghproxy (mainland China)
@@ -96,7 +97,7 @@ yikv::db::DB& db = yikv::db::DB::Instance();
 ```
 
 - **`db_path`**: Root path for all indexes. `Init` creates this directory if it does not exist.
-- **`alloc_defaults`**: Default `yikv::alloc::AllocatorOptions` for every index. The DB sets `path` per index to `<db_path>/<index_name>/arena` (and growth segments). You normally tune **`arena_size`**, **`segment_size`**, **`max_arena_size`**, **`mode`**, and **`reclaim_delay_ns`** here; do not rely on `path` in `alloc_defaults` for multi-index layout—the DB overwrites it per index.
+- **`alloc_defaults`**: Default `yikv::alloc::AllocatorOptions` for every index. The DB sets `path` per index to `<db_path>/<index_name>/arena` (and growth segments). **`mode` defaults to `AllocatorMode::Concurrent`** in `AllocatorOptions`. You normally tune **`arena_size`**, **`segment_size`**, **`max_arena_size`**, **`mode`** (set **`SingleWriter`** only for single-threaded mutation paths), and **`reclaim_delay_ns`** here; do not rely on `path` in `alloc_defaults` for multi-index layout—the DB overwrites it per index.
 - **`exclusive_arena_lock`** (default **`true`**): Before mmap, each opened index acquires an advisory non-blocking **`flock(LOCK_EX)`** on `<db_path>/<name>/arena.lock` (creating the file if missing). That reduces the chance of two processes mapping the same **`MAP_SHARED`** arena for writes and corrupting it. Locks are released when the index slot is torn down (`CloseAll` / process exit). This is **advisory** (all cooperating writers must use the same locking discipline). Behavior on networked filesystems can differ from local disks. Set to **`false`** only in tightly controlled tooling or tests—not for concurrent production writers on the same index directory.
 
 - Call **`Init` exactly once** per process. Calling `Instance()` before `Init` throws. Calling `Init` when already initialized throws.

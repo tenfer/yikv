@@ -19,6 +19,13 @@ cc_library(
 )
 
 cc_library(
+    name = "concurrent_hashmap",
+    hdrs = ["concurrent_hashmap.h"],
+    copts = ["-std=c++17"],
+    deps = ["//src/container:hashmap"],
+)
+
+cc_library(
     name = "string",
     srcs = ["string.cc"],
     hdrs = ["string.h"],

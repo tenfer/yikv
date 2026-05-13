@@ -17,10 +17,12 @@
 
 ## 约束与特点
 
-1. **分配器**：索引通过 [`Allocator`](../alloc/allocator.h) 在 arena 内分配（典型 `FtAllocator`）；Doc、`HashMap` 节点、倒排 `Bitmap` 均在同一 arena，可 mmap 恢复。
+1. **分配器**：索引通过 [`Allocator`](../alloc/allocator.h) 在 arena 内分配（典型 `FtAllocator`）；Doc、`ConcurrentHashMap` 节点、倒排 `Bitmap` 均在同一 arena，可 mmap 恢复。
 2. **持久化**：配合文件映射 arena 时，元数据与数据可落在映射文件中。
-3. **模型**：**单写多读（SWMR）**；读侧通过 `HashMap::acquire_snapshot()` / `Bitmap` 只读接口访问。
+3. **模型**：**KVIndex** 主键表为 `ConcurrentHashMap`，`next_doc_id` **原子**递增；`Upsert` / `BatchUpsert` / **Delete** 由 **`write_mx_`** 互斥，可与 **Get**、**Put**（不同主键）等并发；多线程写 arena 须 **`AllocatorMode::Concurrent`**。**InvertedIndex** 另含 **Bitmap（SWMR）**，全表多写仍需谨慎。`Get` 与 **Delete(同键)** 并发仍可能观察到瞬时不一致，需要时由应用层保证。
 4. **组件**：`KVIndex`（主键 → Doc 偏移）、`InvertedIndex`（在 KV 之上维护 term → posting `Bitmap`）。
+
+**兼容性**：`docs_hdr_off` / `posting_hdr_off` 现为 **ConcurrentHashMap 头表区域**偏移；旧版 **HashMap `HmRoot`** 偏移无法直接打开，需重建该索引目录。
 
 ---
 
@@ -71,15 +73,15 @@ assert(idx.Get("42", &out));
 | API | 说明 |
 |-----|------|
 | `NewDoc()` | 新 Doc + 新 `doc_id` |
-| `Put(Doc*)` | 按主键 upsert；若已存在则 **`Retire`** 旧 Doc；内部 **`docs_->put` + `publish()`** |
-| `BatchPut` | 多次 `put` 后一次 **`publish()`** |
-| `Get(pk, Doc*)` | 快照读；`out` 附着到 arena 中已有 Doc |
-| `BatchGet` | 批量快照读 |
-| `Delete(pk)` | 若存在则 **`Retire`** Doc 并 erase；**`publish()`** |
-| `Publish()` | 仅 `docs_->publish()`；通常 **`Put` / `Delete` / `BatchPut` 已自动发布** |
-| `Size()` | 当前文档条数（writer 视图） |
+| `Put(Doc*)` | **仅插入**：主键尚不存在时 **`docs_->put`**（与 `Upsert` 区分） |
+| `BatchPut` | 多次 `put`；大批量时周期性 **`FlushTlc` / `ReclaimExpired`** |
+| `Get(pk, Doc*)` | **`docs_->get`** |
+| `BatchGet` | 批量 `get` |
+| `Delete(pk)` | 若存在则 **`Retire`** Doc 并 **`erase`** |
+| `Publish()` | **`FlushTlc` + `ReclaimExpired()`**（可选检查点；非 SWMR 下的「发布」语义） |
+| `Size()` | 当前文档条数 |
 | `index_hdr_offset()` | 持久：含 `next_doc_id` 的块偏移 |
-| `docs_root_offset()` | 持久：KV `HashMap` 的 **HmHeader** 偏移（稳定 `root_offset()`） |
+| `docs_root_offset()` | 持久：KV **`ConcurrentHashMap`** 的 **头表区域**偏移（`head_region_offset()`） |
 
 **须持久化以供恢复的两个量**：`index_hdr_offset()` 与 `docs_root_offset()`（非 0 即已分配，写入你的表元数据）。
 
@@ -96,14 +98,14 @@ KVIndex idx(&alloc, &schema,
 // 继续 Put/Get
 ```
 
-`saved_docs_hdr_off` 为上次 `docs_root_offset()`；对应 `HashMap` 的稳定 header，而非临时 root。
+`saved_docs_hdr_off` 为上次 `docs_root_offset()`；对应 **`ConcurrentHashMap`** 的头表 preamble + bucket 目录，而非旧版 HashMap 的 `HmRoot`。
 
 ---
 
 ## InvertedIndex 使用
 
-- **构造**：第四个参数为 **`posting_hdr_off`**（posting `HashMap` 的稳定 header）；新建传 `0`。
-- **`Put` / `Delete`**：若存在旧文档则先 **Deindex**，再 **`KVIndex::Put` / `Delete`**，再 **Index**；结束时会 **`postings_->publish()`**（与 `docs_` 的 publish 配合）。
+- **构造**：第四个参数为 **`posting_hdr_off`**（posting `ConcurrentHashMap` 头表区域）；新建传 `0`。
+- **`Put` / `Delete`**：若存在旧文档则先 **Deindex**，再 **`KVIndex::Put` / `Delete`**，再 **Index**；posting 表更新为即时可见。
 - **Posting 键**：内部为 **`std::to_string(field_id) + "#" + normalized_term`**（term 经 `Normalize` 小写；**字符串** 值经 **`Tokenize`**：连续字母数字为一词）。
 - **整型字段**：term 为 **`std::to_string(数值)`**（十进制），**不**走分词。
 - **查询**：
@@ -131,9 +133,10 @@ if (inv.Query(body_fid, "hello", &hits)) {
 
 ## 内存与并发
 
-- **单写**：同一 `KVIndex` / `InvertedIndex` 上仅一个线程执行 `Put` / `Delete` / `BatchPut`。
-- **多读**：`Get` / `Query*` 使用快照或只读 `Bitmap`，可与写线程并发；读者持有 arena 指针的时间宜 **短于** `reclaim_delay_ns`（见 allocator 文档）。
-- 无需对 `HashMap` 单独调用已移除的 `reclaim()`；**`publish()`** 会内联清理过期 retired 批次并触发 **`ReclaimExpired()`**。
+- **KVIndex**：`Put` / `BatchPut`（建议不同主键）与 `Get` 可并发；`Upsert` / `Delete` 之间互斥，且可与 `Get` 并发（同键读写需自洽）。**`NewDoc` + 并发 `Put`** 请使用 **`AllocatorMode::Concurrent`** 的 `FtAllocator`（见 `KVIndexConcurrentTest`）。
+- **InvertedIndex**：posting 侧 **`Bitmap` 仍为 SWMR**；多线程 `Put`/`Query` 见 `bitmap.h` 与字段级约束。
+- **`Publish()`**：`KVIndex::Publish()` 与 `InvertedIndex::Publish()` 调用分配器 **`FlushTlc` / `ReclaimExpired()`**，用于回收与检查点；**非** HashMap 时代的 staged 发布。
+- 无需对 map 单独调用已移除的 `reclaim()`。
 
 ---
 

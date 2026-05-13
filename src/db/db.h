@@ -39,9 +39,10 @@ public:
     DB(const DB&)            = delete;
     DB& operator=(const DB&) = delete;
 
-    // initial_docs_bucket_bits: log2 of the initial HashMap bucket count (default 15 = 32K).
+    // initial_docs_bucket_bits: log2 of the initial ConcurrentHashMap bucket count (default 15 = 32K).
     // Pass a larger value (e.g. ceil(log2(expected_rows))) to pre-size the map and
-    // avoid rehashes entirely during bulk import.
+    // reduce rehash during bulk import. Existing on-disk indexes that used the old
+    // HashMap root offset for docs_hdr_off are not compatible; rebuild those stores.
     void CreateKVIndex(std::string_view name, const schema::Schema& schema,
                        uint32_t initial_docs_bucket_bits = 15);
     void CreateInvertedIndex(std::string_view name, const schema::Schema& schema);

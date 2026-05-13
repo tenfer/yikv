@@ -31,7 +31,7 @@ cc_library(
     deps = [
         ":doc",
         ":index_base",
-        "//src/container:hashmap",
+        "//src/container:concurrent_hashmap",
         "//src/schema:schema",
     ],
 )
@@ -44,7 +44,7 @@ cc_library(
     deps = [
         ":kv_index",
         "//src/container:bitmap",
-        "//src/container:hashmap",
+        "//src/container:concurrent_hashmap",
         "//src/schema:schema",
     ],
 )

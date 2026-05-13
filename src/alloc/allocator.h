@@ -25,7 +25,7 @@ struct AllocatorOptions {
     std::uint64_t segment_size      = 1ull * 1024 * 1024 * 1024;
     std::uint64_t max_arena_size    = 0;
     std::uint32_t page_size         = 4096;
-    AllocatorMode mode              = AllocatorMode::SingleWriter;
+    AllocatorMode mode              = AllocatorMode::Concurrent;
     bool          create_if_missing = true;
     // How long (nanoseconds) a Delayed-freed block must age before it is
     // eligible for reclamation.  Default: 5 seconds.  Callers with known-short
