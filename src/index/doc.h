@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "src/alloc/allocator.h"
 
@@ -21,8 +22,16 @@ namespace index {
 //   Fixed scalar (int64/double) : a = value as uint64,                b = 0
 //   String                      : a = byte_len,        b = arena_off -> char data
 //   Array                       : a = elem_count,      b = arena_off -> [uint64 cap | elem data...]
-//   String array                : a = elem count,      b = arena_off -> [uint64 cap | uint32 n |
-//                                 uint32_t lens[n] | concatenated string bytes] (same a semantics as numeric arrays)
+//   String array                : a = elem count,      b = arena_off ->
+//                                   [uint32 cap_count | uint32 cap_bytes |
+//                                    uint32 count     | uint32 bytes_used |
+//                                    uint32 lens[cap_count] |
+//                                    char   bytes_payload[cap_bytes]]
+//                                 The buffer reserves slack in both the lens
+//                                 array (cap_count >= count) and the byte
+//                                 payload (cap_bytes >= bytes_used) so that
+//                                 array_append_string is amortized O(1) per
+//                                 element (1.2x geometric grow on overflow).
 //
 // Field access uses field_id as the slot index; match getters/setters to the schema type.
 //
@@ -66,23 +75,50 @@ public:
     std::pair<const float*,   uint32_t>  array_view_float(uint32_t fid) const;
     std::pair<const double*,  uint32_t>  array_view_double(uint32_t fid) const;
 
-    int32_t  array_get_int32   (uint32_t fid, uint32_t i) const;
-    void     array_put_int32   (uint32_t fid, const int32_t* data, uint32_t count);
-    void     array_append_int32(uint32_t fid, int32_t val);
+    int32_t  array_get_int32    (uint32_t fid, uint32_t i) const;
+    void     array_put_int32    (uint32_t fid, const int32_t* data, uint32_t count);
+    void     array_append_int32 (uint32_t fid, int32_t val);
+    // Appends `count` elements in a single grow (1 allocation regardless of N).
+    // Prefer this over a loop of array_append_int32 for contiguous batches.
+    // `data` must not alias the slot's existing array contents.
+    void     array_append_int32s(uint32_t fid, const int32_t* data, uint32_t count);
 
-    int64_t  array_get_int64   (uint32_t fid, uint32_t i) const;
-    void     array_put_int64   (uint32_t fid, const int64_t* data, uint32_t count);
-    void     array_append_int64(uint32_t fid, int64_t val);
+    int64_t  array_get_int64    (uint32_t fid, uint32_t i) const;
+    void     array_put_int64    (uint32_t fid, const int64_t* data, uint32_t count);
+    void     array_append_int64 (uint32_t fid, int64_t val);
+    void     array_append_int64s(uint32_t fid, const int64_t* data, uint32_t count);
 
-    float    array_get_float   (uint32_t fid, uint32_t i) const;
-    void     array_put_float   (uint32_t fid, const float* data, uint32_t count);
+    float    array_get_float    (uint32_t fid, uint32_t i) const;
+    void     array_put_float    (uint32_t fid, const float* data, uint32_t count);
+    void     array_append_float (uint32_t fid, float val);
+    void     array_append_floats(uint32_t fid, const float* data, uint32_t count);
 
-    double   array_get_double  (uint32_t fid, uint32_t i) const;
-    void     array_put_double  (uint32_t fid, const double* data, uint32_t count);
+    double   array_get_double   (uint32_t fid, uint32_t i) const;
+    void     array_put_double   (uint32_t fid, const double* data, uint32_t count);
+    void     array_append_double (uint32_t fid, double val);
+    void     array_append_doubles(uint32_t fid, const double* data, uint32_t count);
 
     std::string_view array_get_string(uint32_t fid, uint32_t i) const;
     void             array_put_string(uint32_t fid, const std::string_view* parts,
                                      uint32_t      count);
+    // Appends a single element to a string-array slot. Amortized O(|part|)
+    // per call: writes lens[count] and memcpys `part` into the byte payload
+    // in place when both the lens-array and byte-payload have spare capacity;
+    // otherwise grows the underlying buffer geometrically.
+    void             array_append_string(uint32_t fid, std::string_view part);
+    // Appends `count` elements to a string-array slot in a single grow
+    // (1 allocation regardless of N). Prefer this over a loop of
+    // array_append_string when the caller already has a contiguous batch.
+    void             array_append_strings(uint32_t fid, const std::string_view* parts,
+                                          uint32_t count);
+    // Returns views over every element of a string-array slot in order.
+    // Each view points into arena memory and is valid until the next mutation
+    // of this slot (any put/append on the same fid) or arena reclamation
+    // following Retire. The out-param overload appends to `*out` without
+    // clearing it; the value-returning overload allocates a fresh vector.
+    void                          array_view_string(uint32_t fid,
+                                                    std::vector<std::string_view>* out) const;
+    std::vector<std::string_view> array_view_string(uint32_t fid) const;
 
 private:
     struct DocHeader {
@@ -101,11 +137,13 @@ private:
     uint64_t array_capacity(uint32_t fid) const;
 
     template <typename T>
-    T*   array_data       (uint32_t fid) const;
+    T*   array_data             (uint32_t fid) const;
     template <typename T>
-    void array_put_impl   (uint32_t fid, const T* data, uint32_t count);
+    void array_put_impl         (uint32_t fid, const T* data, uint32_t count);
     template <typename T>
-    void array_append_impl(uint32_t fid, T val);
+    void array_append_impl      (uint32_t fid, T val);
+    template <typename T>
+    void array_append_batch_impl(uint32_t fid, const T* data, uint32_t count);
 
     alloc::Allocator* alloc_ = nullptr;
     uint64_t          off_   = 0;
