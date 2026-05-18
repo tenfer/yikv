@@ -1,302 +1,247 @@
-# yikv
+# yikv-server
 
-`yikv` is a layered retrieval and storage project under active refactoring base on mmap. **Bazel** is the primary build system.
+[English README](README.en.md)
 
-## Project status & contact
+## 1. 项目作用
 
-The project is **still in progress**; APIs and on-disk formats may change. If you run into **bugs** or have questions from real use, please contact: **fansichi@qq.com**.
+**yikv-server** 在 **`libs/yikv/`** 内嵌的 **yikv 核心 KV 引擎** 快照之上提供 **多表 KV 在线服务**：数据落在 `{db_path}/{表名}/` 的 mmap arena 与索引中，通过 RPC 暴露 **Get / Put / PutBatch / BatchGet**。
 
-**Job search:** the maintainer is **looking for engineering roles** (systems / storage / infrastructure / backend—areas close to this codebase). Referrals, openings, or a short intro are welcome at the same address: **fansichi@qq.com**.
+- **引擎同步**：有独立上游 `yikv` 仓库时，运行 **`scripts/sync_yikv_lib.sh`**（或 `YIKV_SOURCE=/path/to/yikv ./scripts/sync_yikv_lib.sh`）刷新 `libs/yikv/`。
 
-## Repository layout
+- **源码布局约定**：团队对 **`libs` / 常驻服务端 / `apps/workers`（批处理）** 的路径语义见 **[`libs/yikv/README.md`](libs/yikv/README.md)** 章节 **「仓库目录布局（团队约定）」**。
 
-- `src/alloc`: mmap / arena allocators
-- `src/container`: core containers (`HashMap`, `Bitmap`, `List`, `Vector`, `String`, …); see [`src/container/README.md`](src/container/README.md) and [`src/container/USAGE.md`](src/container/USAGE.md)
-- `src/schema`: unified schema and document metadata
-- `src/index`: KV, inverted, and vector index interfaces and implementations
+- **双协议、同端口**：**brpc `baidu_std`**（`BaiduMasterService`）与 **gRPC `h2:grpc`**（[`proto/yikv_grpc.proto`](proto/yikv_grpc.proto)）；业务载荷均为 **FlatBuffers**（[`proto/yikv_server.fbs`](proto/yikv_server.fbs) → [`gen/yikv_server_generated.h`](gen/yikv_server_generated.h)）。
+- **离线建索引**：对外通过 **`pipeline_agent` HTTP API** 编排导入与制品；底层由 **`yikv_import_pipeline`** 写入 `KVIndex`。**调度与业务只调 HTTP**，勿在机器上手跑导入命令。
+- **实时增量（可选）**：表目录下 **`table.json`** 配置 Kafka，由 **KafkaSource** 消费 JSON 变更写入同一索引（格式见下文简述）。
 
-## Prerequisites
-
-### Installing Bazel (Bazelisk)
-
-Use **[Bazelisk](https://github.com/bazelbuild/bazelisk)** as the **`bazel`** command so [`.bazelversion`](.bazelversion) is picked up automatically. **Linux x86_64**:
-
-```bash
-sudo curl -L https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 -o /usr/local/bin/bazel
-sudo chmod +x /usr/local/bin/bazel
-```
-
-Other OS or CPU (e.g. **`bazelisk-linux-arm64`**): download the matching binary from the [Bazelisk releases](https://github.com/bazelbuild/bazelisk/releases) page and install it onto your `PATH` as `bazel` the same way.
-
-- **Bazel** (required): builds go through **Bazel** only; the repo pins **7.4.1** in [`.bazelversion`](.bazelversion) (installed Bazelisk will download that release on first run).
-- **C++17 toolchain**: GCC or Clang with `ar` / `ranlib`. `make bundle-lib` and `install` link `libyikv.so` with **`g++`** unless you set **`CXX`**.
-- **Bash**: `Makefile` **`install-headers`** relies on Bash (`read -d ''`); **`SHELL := /bin/bash`** is assumed.
-- **Network** (first build): Dependencies resolve via **Bazel Central Registry** and two custom **`--registry=`** sources for **babylon** / **secretflow** (see [`bazel/registries/default.bazelrc`](bazel/registries/default.bazelrc)). Default is **GitHub direct** (`raw.githubusercontent.com`). **`MODULE.bazel` tarball URLs** (**`brpc`**, **`bazel_features`**) try **GitHub Releases first**, then **`ghproxy.net`** as fallback. Inside mainland China, use **`make GHPROXY=1 …`** so Makefile (and **`scripts/bundle-libyikv.sh`** when **`YIKV_BAZEL_GHPROXY=1`** is set) load [`bazel/registries/ghproxy.bazelrc`](bazel/registries/ghproxy.bazelrc) instead of the default registry file. For **`bazel`** without Make: `bazel --noworkspace_rc --bazelrc=bazel/registries/ghproxy.bazelrc --bazelrc=bazel/buildflags.bazelrc build //…`. Plain **`bazel build`** with only the workspace [`.bazelrc`](.bazelrc) uses **direct** registries by default.
-
-Convenience targets (`make all`, `make install`) still invoke Bazel under the hood—you need a working **`bazel`** on `PATH`.
-
-## Build
-
-```bash
-bazel build //... && bazel test //tests:all_tests
-bazel build //:libyikv    # one merged libyikv.so (cc_shared_library; same role as bundle merge)
-
-make all          # tools + tests + lib merge → bazel-bin/libyikv.{a,so}
-make GHPROXY=1 all   # optional: babylon/secretflow registry JSON via ghproxy (mainland China)
-make bundle-lib   # lib merge only ([scripts/bundle-libyikv.sh](scripts/bundle-libyikv.sh))
-make clean
-make test
-make check        # same tests, Bazel -c dbg
-```
-
-## Install
-
-Install layout follows GNU conventions: **`$(DESTDIR)$(PREFIX)`** (default **`PREFIX=/usr/local`**). **`make install`** copies **`libyikv.so`** and **`libyikv.a`** by default (**`INSTALL_STATIC=0`** → shared only; **`INSTALL_SHARED=0`** → static archive only), **`include/yikv/`** mirrors **`src/**/*.h`** (e.g. **`include/yikv/src/db/db.h`**), **`yikv-db_tool`**, README under **`share/doc/yikv`** (skip with **`INSTALL_DOCS_CLI=0`**; skip headers with **`INSTALL_HEADERS=0`**).
-
-```bash
-sudo make install                                          # typical (.so + .a)
-make install DESTDIR=/tmp/stage PREFIX=/usr              # staging for packages
-sudo make install INSTALL_STATIC=0                       # shared library only
-sudo make install INSTALL_SHARED=0                       # libyikv.a only
-sudo make uninstall                                        # same PREFIX / DESTDIR as install
-```
-
-Portable CPU tuning when building the merged library: **`PORTABLE=1 make bundle-lib`** (generic x86-64) or **`PORTABLE=haswell`** etc. Overrides: **`BINDIR`**, **`LIBDIR`**, **`INCLUDEDIR`**, **`CXX`** (links `.so`; see **`scripts/bundle-libyikv.sh`**).
-
-Consume installed headers as **`#include "src/db/db.h"`** with **`-I$PREFIX/include/yikv`** and **`-std=c++17 -pthread`**:
-
-```bash
-g++ -std=c++17 -pthread -I/usr/local/include/yikv app.cc \
-  -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lyikv
-# static link: .../libyikv.a (installed by default together with libyikv.so)
-```
-
-## Notes
-- Prefer extending via the storage abstraction in `src/storage/store.h` and existing Bazel targets.
-- Allocators: [`src/alloc/README.md`](src/alloc/README.md). HashMap / Bitmap usage: [`src/container/USAGE.md`](src/container/USAGE.md).
+更细的契约、排错与内部流程见 **[`db.md`](db.md)**。
 
 ---
 
-## Database API (`yikv::db::DB`)
+## 2. 快速安装
 
-The `DB` class is a **process-wide singleton**. You initialize it once with `Init`, then use `Instance()` everywhere. Each logical **index** is a subdirectory of the database root and owns its own mmap arena and metadata files.
+**环境**
 
-### Initialization
+- **Bazel**（与仓库 [`MODULE.bazel`](MODULE.bazel) / [`.bazelversion`](.bazelversion) 一致）。
+- **系统**：**OpenSSL**；编译/运行导入与压测需 **Apache Arrow C++ / Parquet**（如 `libarrow-dev`、`libparquet-dev`）。
+- **MySQL 源导入（可选）**：`libmysqlclient-dev`（构建）及运行时的 **`libmysqlclient.so`**。
 
-```cpp
-#include "src/db/db.h"
-#include "src/schema/schema.h"
+**构建**
 
-yikv::db::DBOptions opt;
-opt.db_path = "/var/lib/yikv/data";   // root directory (created if missing)
-opt.alloc_defaults.arena_size = 256ull * 1024 * 1024;  // default arena segment sizing; see below
-// opt.exclusive_arena_lock = true;  // default; see "Arena lock file" below
-
-yikv::db::DB::Init(std::move(opt));
-yikv::db::DB& db = yikv::db::DB::Instance();
+```bash
+cd yikv-server
+bazel build //:yikv_server //:yikv_import_pipeline //:yikv_server_bench
 ```
 
-- **`db_path`**: Root path for all indexes. `Init` creates this directory if it does not exist.
-- **`alloc_defaults`**: Default `yikv::alloc::AllocatorOptions` for every index. The DB sets `path` per index to `<db_path>/<index_name>/arena` (and growth segments). **`mode` defaults to `AllocatorMode::Concurrent`** in `AllocatorOptions`. You normally tune **`arena_size`**, **`segment_size`**, **`max_arena_size`**, **`mode`** (set **`SingleWriter`** only for single-threaded mutation paths), and **`reclaim_delay_ns`** here; do not rely on `path` in `alloc_defaults` for multi-index layout—the DB overwrites it per index.
-- **`exclusive_arena_lock`** (default **`true`**): Before mmap, each opened index acquires an advisory non-blocking **`flock(LOCK_EX)`** on `<db_path>/<name>/arena.lock` (creating the file if missing). That reduces the chance of two processes mapping the same **`MAP_SHARED`** arena for writes and corrupting it. Locks are released when the index slot is torn down (`CloseAll` / process exit). This is **advisory** (all cooperating writers must use the same locking discipline). Behavior on networked filesystems can differ from local disks. Set to **`false`** only in tightly controlled tooling or tests—not for concurrent production writers on the same index directory.
+可执行文件在 `bazel-bin/`（或 `bazel run //:yikv_server -- /path/to/config.json`）。默认从网络/cache 解析 Bzlmod（见 [`bazel/vendor.bazelrc`](bazel/vendor.bazelrc)）。可选本地 vendor：**`bazel vendor --vendor_dir=vendor`** 生成 **`vendor/`**（含 **`VENDOR.bazel`**，仅本地、已由 **`.gitignore`** 忽略）后 **`bazel build --config=vendor`**；离线 **`--config=vendor_offline`** 仍依赖 **`third_party/tarball`** 与已填充的 **`vendor/`**。**`docker build`**：镜像内 **`builder`** 在线解析；国内可加 **`--build-arg BAZEL_VENDOR_CONFIG=cn`**。
 
-- Call **`Init` exactly once** per process. Calling `Instance()` before `Init` throws. Calling `Init` when already initialized throws.
+**版本**：发布以 **语义化 git tag（如 `v0.1.0`）** 为主；[`MODULE.bazel`](MODULE.bazel) 顶层 `module(version = …)` 应在发版时与 tag **对齐**，便于下游与锁文件对照。
 
-For unit tests, **`DB::ResetForTest()`** tears down the singleton so another `Init` can run in the same process.
+**外部依赖核心库**：Bazel 上对外推荐使用 **`//libs/yikv:yikv_core`**（聚合 `alloc`/`db`/`index`/`schema`）；细粒度依赖各子 target 仍以 `//libs/yikv/…` 为准。保障级别：**源码/API 兼容性 + semver**；未承诺跨编译器的 **C++ 二进制 ABI**（见 **`docs/YIKV_CORE_API.md`**）。
 
-### On-disk layout per index
+**配置**
 
-For an index named `<name>` (non-empty, no `/` or `\`):
+复制并编辑 [`config.example.json`](config.example.json) 为 `config.json`。服务与导入工具**共用**其中的 `db_path`、`arena_seg_gb`、`arena_max_gb`、`exclusive_arena_lock`（**不可**在导入 CLI 里改这些，避免与线上一致）。
 
-| Path | Purpose |
-|------|---------|
-| `<db_path>/<name>/schema.json` | Schema JSON (written at create / used on open) |
-| `<db_path>/<name>/index.meta.json` | Index kind (KV vs inverted) and recovery offsets into the arena |
-| `<db_path>/<name>/arena` | Primary mmap arena file (`FtAllocator`); additional `.segN` files may appear when the arena grows |
-| `<db_path>/<name>/arena.lock` | Advisory exclusive lock file (when `exclusive_arena_lock` is true); touched on first open |
+| 字段 | 说明 |
+|------|------|
+| `db_path` | 数据根目录；每个子目录名即表名 |
+| `listen` | 监听地址，默认 `0.0.0.0:9000` |
+| `arena_seg_gb` / `arena_max_gb` | 单段与总 arena 上限 (GiB) |
+| `exclusive_arena_lock` | 默认 `true`，导入与服务不要同时写同一库 |
+| `kafka.default_brokers` | 可选；表级可在 `table.json` 覆盖 |
 
-### Creating indexes
+### 2.1 容器镜像与 Kubernetes（Ubuntu 22.04）
 
-Load or build a `yikv::schema::Schema`, then create either a **KV** or **inverted** index:
+- **镜像**：多阶段构建见 [`deploy/docker/Dockerfile`](deploy/docker/Dockerfile)。在 **`yikv-server` 仓库根**执行：
 
-```cpp
-yikv::schema::Schema schema;
-std::string err;
-if (!schema.LoadJson(json_string, &err)) { /* handle err */ }
+  ```bash
+  docker build -f deploy/docker/Dockerfile -t yikv-server:latest .
+  ```
 
-db.CreateKVIndex("main", schema);           // exact PK lookup; HashMap → Doc offsets
-db.CreateInvertedIndex("search", schema);   // KV store + term postings for `is_index` fields
-```
+  或：`bash deploy/docker/build.sh -t yikv-server:latest`（同上，自动选对 `docker`/`podman`）
 
-- **`CreateKVIndex` / `CreateInvertedIndex`**: Create a **new** directory `<db_path>/<name>/`. If it already exists, creation fails.
-- After creation, the index is **open** in the current process.
+  仅构建编译阶段镜像：`docker build -f deploy/docker/Dockerfile --target builder -t yikv-server:build .`
 
-### Opening existing indexes
+- **说明**：构建阶段镜像安装 `libflatbuffers-dev`、`nlohmann-json3-dev` 等，与常见开发机一致；仓库内 `third_party` 头文件占位不全时由系统头补全。运行阶段镜像仅含二进制与运行时 `.so`（如 OpenSSL、librdkafka）。**容器内开发环境**（挂宿主机源码）用 `builder-base`，见 [`deploy/docker/README.md`](deploy/docker/README.md#开发环境推荐-builder-base)。
 
-After a restart, recreate the same `DBOptions` (same `db_path` and compatible allocator defaults), call `Init`, then **open** each index you need:
+- **K8s**：清单使用 Kustomize，[`deploy/k8s/base`](deploy/k8s/base) + [`deploy/k8s/overlays/prod`](deploy/k8s/overlays/prod)。一键脚本（需 `docker`、`kubectl`、`python3`）：
 
-```cpp
-db.OpenIndex("main");   // no-op if already open
-```
+  ```bash
+  ./yikv-server/deploy/k8s/deploy.sh
+  REGISTRY=myregistry.example ./yikv-server/deploy/k8s/deploy.sh   # 构建、push、应用并 rollout
+  KIND_LOAD=1 ./yikv-server/deploy/k8s/deploy.sh                   # kind：构建后将镜像 load 进集群
+  ```
 
-`OpenIndex` reads `schema.json` and `index.meta.json`, mmaps the arena, and reconstructs `KVIndex` or `InvertedIndex` from persisted offsets.
+  **本机跑通示例**：安装 [kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) 与 [kind](https://kind.sigs.k8s.io/docs/user/quick-start/)，推荐 **MinIO + Kafka + 在线 + 构建 Job 闭环**：[`deploy/e2e/README.md`](deploy/e2e/README.md)（`quickstart.sh` / `bootstrap-kind.sh` / `deploy-online.sh` / `run-publish-job.sh`）。  
+  最小在线：自建 `kind` 集群后 `KIND_LOAD=1 ./yikv-server/deploy/k8s/deploy.sh`（集群需有默认 `StorageClass`；缺省 overlay 不含 MinIO 与 Kafka 依赖，需自备或改用 `overlays/e2e`）。
 
-### Accessing indexes
+  卸载：`./yikv-server/deploy/k8s/teardown.sh`
 
-```cpp
-yikv::index::KVIndex*       kv = db.GetKVIndex("main");
-yikv::index::InvertedIndex* inv = db.GetInvertedIndex("search");
-```
-
-- Wrong type (e.g. `GetKVIndex` on an inverted index) throws.
-- Unknown name throws.
-
-### Closing
-
-```cpp
-db.CloseAll();   // drops in-memory index handles and closes allocators; data on disk remains
-```
-
-Typical **recovery** pattern: `CloseAll` or process exit → later `Init` + `OpenIndex` for each index.
+- **约束**：默认 **1 副本** + `ReadWriteOnce` PVC；多副本需独立数据目录/分片策略。`ScanAndLoad` 可能较慢，Deployment 已配较长 **`startupProbe`（TCP 9000）**。
 
 ---
 
-### Schema (JSON)
+## 3. 流程介绍
 
-Schemas are loaded with `Schema::LoadJson`. Canonical JSON includes `table_name`, `pk` (primary key field name), and a `fields` array. Each field should have a stable **`field_id`**, **`data_type`** (e.g. `int32`, `int64`, `string`), **`is_pk`**, and for inverted participation **`is_index`**.
+### 3.1 离线索引构建（仅 HTTP API）
 
-- **KV index**: Primary key field drives storage keys; other fields are stored in the arena `Doc`.
-- **Inverted index**: Subclasses `KVIndex` and maintains posting lists for fields with **`is_index: true`**. Only those fields participate in `Query` / `QueryAnd` / `QueryOr`.
+**构建机 / 线上机**运行 **[`tools/pipeline_agent/pipeline_agent.py`](tools/pipeline_agent/pipeline_agent.py)**（FastAPI）。**离线构建、推送、部署只对调度侧暴露 HTTP**；agent 在进程内调用 `yikv_import_pipeline` 与 `tools/artifact_sync`。数据源形态（Parquet/CSV/目录/云 URI/MySQL 等）与导入细节见 **[`db.md`](db.md)**；**直接执行 `yikv_import_pipeline` 仅用于排错或开发**。
 
-Compatibility rules for evolving schemas are documented in `src/schema/schema.h` (e.g. SparseRowBinary allows appending new fields with new `field_id` values).
+**客户三步（原始数据 → 构建并发布 → 线上拉取并加载）**
 
----
-
-### `KVIndex` usage
-
-Header: `src/index/kv_index.h`.
-
-1. **`NewDoc()`** — Allocates a new document with a fresh `doc_id` and slots sized from `schema.MaxFieldId()`.
-2. **Fill fields** — Use `Doc` getters/setters with **`field_id`** values that match your schema (same IDs as in JSON), e.g. `doc.put_int64(fid, 42)`, `doc.put_string(fid, "alice")`.
-3. **`Put(Doc* doc)`** — Upserts by primary key. The PK string is derived from the PK field: `int32`/`int64` → `std::to_string(...)`, `string` → the string value (other PK types are not supported in `ExtractPk`).
-4. **`Publish()`** — Publishes staged hash-map changes so readers see updates (and for inverted indexes, postings publish too).
-
-```cpp
-yikv::index::KVIndex* idx = db.GetKVIndex("main");
-yikv::index::Doc doc = idx->NewDoc();
-doc.put_int64(kUserIdFid, 42);
-doc.put_int32(kAgeFid, 7);
-doc.put_string(kNameFid, "alice");
-idx->Put(&doc);
-idx->Publish();
+```mermaid
+flowchart LR
+  step1[Raw_Parquet_CSV]
+  pub[publishIndex_build_host]
+  art[Artifact_store]
+  dep[deployIndex_online_host]
+  step1 --> pub --> art --> dep
 ```
 
-**Read:**
+- **第 1 步**：在构建机可访问的位置准备数据（本地目录/单文件、**或** `s3://` / `oss://` / `cos://` / `obs://` / `gs://` 等，与 `yikv_import_pipeline` 一致）。
+- **第 2 步**：对构建机 agent 调用 **`POST /publishIndex`**（内部顺序：删 `BUILD_DB/<表>` → 全量导入 → `push`）；可选在成功后清理构建目录（见下 **`cleanup_build_db_after_push`**）。
+- **第 3 步**：对线上机 agent 调用 **`POST /deployIndex`**（`pull` + 切 `active` + 链到 `SERVER_DB` + `reload`）。
 
-- **`Get(std::string_view pk, Doc* out)`** — `pk` must match the string form used for storage (e.g. `"42"` for int64 `42`).
-- **`BatchGet`**, **`Delete`**, **`BatchPut`** — See `kv_index.h`.
+程序化调用推荐使用 **[`tools/pipeline_agent/pipeline_http_client.py`](tools/pipeline_agent/pipeline_http_client.py)** 中的 **`YikvPipelineClient`**（`publish_index` / `deploy_index`）；命令行编排仍可用 [`tools/schedule_pipeline.py`](tools/schedule_pipeline.py)。
 
----
+**`buildIndex` / `publishIndex` 请求体中的 `input`**
 
-### `InvertedIndex` usage
+| `input`（JSON） | agent 映射 |
+|-----------------|------------|
+| **字符串**，且为构建机上已存在的 **目录** | `--input_dir` |
+| **字符串**，且为 **云 URI**（上述 scheme） | 单个 `--input` |
+| **字符串**，且为本地 **文件** | 单个 `--input` |
+| **字符串数组** | 每个元素各追加 `--input`（本地须为已存在文件，或为云 URI） |
+| 仅 **`data_dir`**（与 `input` 二选一，兼容旧客户端） | `--input_dir` |
 
-Header: `src/index/inverted_index.h`. Inherits all KV operations; **`Put` / `Delete`** also maintain inverted postings for indexed fields.
+可选 **`cleanup_build_db_after_push`: true**，或环境变量 **`CLEANUP_BUILD_DB_AFTER_PUSH=1`**：在 **`/publishIndex`** 成功 push 后删除 **`BUILD_DB/<表名>`**，释放构建机磁盘。
 
-**Write:** same as KV: `NewDoc`, set PK and indexed text fields, `Put`, `Publish`.
+**依赖（构建机）**
 
-**Search:**
+```bash
+pip install -r requirements.txt   # 在 yikv-server 仓库根目录执行
+cd yikv-server   # 须已 `bazel build //:yikv_import_pipeline`（§2）
+python3 tools/pipeline_agent/pipeline_agent.py   # 默认 0.0.0.0:8787，HOST/PORT/WORK 等见脚本文件头
+```
 
-- **`Query(field_id, term, Bitmap* out)`** — Single normalized term; returns whether the term map existed (`bool`), and fills `out` with a posting bitmap of `doc_id` values.
-- **`QueryAnd(field_id, terms)`** — Documents containing **all** terms in that field.
-- **`QueryOr(field_id, terms)`** — Documents containing **any** of the terms.
+**HTTP 路由摘要**
 
-Terms are produced from stored text by tokenization and normalization inside the inverted index implementation—query using the same kind of string you expect after normalization (see tests in `tests/db_test.cc`).
+| 方法 | 路径 | 作用 |
+|------|------|------|
+| `GET` | `/health` | 探活 |
+| `POST` | `/buildIndex` | 仅本机构建（删除 `BUILD_DB/<表>` 后全量导入） |
+| `POST` | `/pushIndex` | 仅推送制品 |
+| `POST` | `/publishIndex` | 构建 + 推送 |
+| `POST` | `/deployIndex` | 拉取、切 `active`、更新 `SERVER_DB` 链接触发 `reload`（通常跑在**线上机**） |
+| `POST` | `/pullIndex` | 仅拉取（可选不切 `active`） |
+| `POST` | `/switchReloadIndex` | 本地已有 release 时切 `active` 并 `reload` |
 
-```cpp
-yikv::index::InvertedIndex* idx = db.GetInvertedIndex("inv");
-yikv::container::Bitmap bm(idx->alloc(), 0);
-if (idx->Query(kBioFid, "hello", &bm)) {
-  if (bm.Contains(doc_id)) { /* ... */ }
+**请求示例**：`POST /publishIndex`，`Content-Type: application/json`
+
+单目录（也可用 `data_dir` 代替 `input`）：
+
+```json
+{
+  "table": "my_table",
+  "input": "/data/raw/my_table",
+  "schema_json": "/abs/path/schema.json"
 }
 ```
 
----
+多文件 / 多云对象（数组 → 多次 `--input`）：
 
-### End-to-end recovery example
-
-Matches the flow in `tests/db_test.cc`:
-
-1. `CreateKVIndex` / create docs / `Put` / `Publish`.
-2. `CloseAll()`, then `ResetForTest()` **only in tests**, or simply exit the process.
-3. New process: `Init` with the **same** `db_path`, `OpenIndex("main")`, `GetKVIndex`, `Get` by PK string.
-
----
-
-### Error handling
-
-Invalid index names, missing directories, schema/meta parse errors, and type mismatches surface as **`std::runtime_error`** or **`std::invalid_argument`** with message prefixes such as `DB::CreateKVIndex:` / `DB::OpenIndex:`. Plan to catch and log these at application boundaries.
-
----
-
-## Benchmarks
-
-Micro-benchmarks use [Google Benchmark](https://github.com/google/benchmark). Targets are plain **`cc_binary`** in [`tests/BUILD`](tests/BUILD) (not part of **`//tests:all_tests`**).
-
-### How to run
-
-```bash
-# Build only
-make benchmark
-bazel build -c opt //tests:kv_index_benchmark //tests:db_benchmark
-
-# KV index layer (mmap arena + HashMap, no DB singleton)
-bazel run -c opt //tests:kv_index_benchmark -- --benchmark_min_time=0.1s
-
-# DB layer (temp dirs, mmap, Create/Open, inverted)
-bazel run -c opt //tests:db_benchmark -- --benchmark_min_time=0.1s
+```json
+{
+  "table": "my_table",
+  "input": ["/data/p1.parquet", "s3://bucket/obj.parquet"],
+  "cleanup_build_db_after_push": true
+}
 ```
 
-Useful flags (after **`--`**):
+`schema_json` 可省略（使用 agent 环境默认值）。列名须与 schema 一致（不区分大小写）。
+
+### 3.1.1 离线索引发布与制品
+
+推送与拉取走 **`/pushIndex`**、**`/publishIndex`**、**`/deployIndex`**。**推荐**在 **`config.server.json`**（`SERVER_CONFIG`，与 `yikv_server` 同文件）中配置顶层 **`artifact_storage`**：此时 **`ARTIFACT_CONFIG`** 默认与该文件相同，`artifact_sync -c` 读嵌套段，无需单独 **`artifact-storage.json`**。若未配置 `artifact_storage`，agent 仍可使用或自动生成 **`$WORK/artifact-storage.json`**。说明见 **[`tools/artifact_sync/README.md`](tools/artifact_sync/README.md)**。
+
+### 3.1.2 离线索引端到端流程（构建 → 制品 → 上线）
+
+典型 **构建机 + 线上机**；**调度只发 HTTP**（可用 [`tools/schedule_pipeline.py`](tools/schedule_pipeline.py) / [`tools/pipeline_reload.py`](tools/pipeline_reload.py)）。
+
+| 阶段 | HTTP | 说明 |
+|------|------|------|
+| 1. 离线导入 | **`POST /buildIndex`** 或 **`/publishIndex`** 的第一步 | 使用与线上一致的 `schema.json`；agent 每次会先删掉本机 **`BUILD_DB/<表名>`**（默认 `$WORK/build_db/<表名>`），再全量导入，避免在原目录上重复 Open 导致数据叠加。 |
+| 2. 上传制品 | **`POST /pushIndex`** 或 **`/publishIndex`** 内嵌 | 将表目录打成 **`build_id`** 写入制品库。 |
+| 3. 拉取并切版本 | **`POST /deployIndex`**（线上 agent） | 在 **`$WORK/releases/<表名>/<build_id>/`** 落盘，原子更新 **`active`**。 |
+| 4. 服务目录 | 含于 **`/deployIndex`** | **`SERVER_DB/<表名>`** → **`releases/<表名>/active`**（须与 **`config.json`** 的 **`db_path`** 一致）。 |
+| 5. 热加载 | 含于 **`/deployIndex`** / **`/switchReloadIndex`** | 经 **`admin_unix_socket`** 发送 **`reload <表名>`**（路径与 `db_path` 默认规则见 **[`db.md`](db.md)** §3）。 |
+
+**调度客户端**：[`tools/schedule_pipeline.py`](tools/schedule_pipeline.py)（或 [`tools/pipeline_reload.py`](tools/pipeline_reload.py)）——`POST /publishIndex` + `POST /deployIndex`；**Python 集成**见 [`tools/pipeline_agent/pipeline_http_client.py`](tools/pipeline_agent/pipeline_http_client.py)。环境变量 **`BUILD_AGENT_URL`**、**`ONLINE_AGENT_URL`**、`--table`、`--data-dir` 等见 **`--help`**。
+
+**自检**：部署后 `readlink -f $db_path/<表名>` 应指向当前 **`…/releases/<表名>/<build_id>`**；`reload` 应答为 **`ok`**（见 **[`db.md`](db.md)**）。
+
+### 3.2 启动服务
+
+**唯一参数**为配置文件路径：
 
 ```bash
-bazel run -c opt //tests:db_benchmark -- --benchmark_list_tests
-bazel run -c opt //tests:kv_index_benchmark -- --benchmark_filter='GetHit'
+./bazel-bin/yikv_server ./config.json
 ```
 
-Binaries appear under **`bazel-bin/tests/kv_index_benchmark`** and **`bazel-bin/tests/db_benchmark`**. On mainland China, use **`make GHPROXY=1 benchmark`** like other Makefile targets.
+确保 `db_path` 存在、磁盘与 arena 配置足够。服务**启动时**扫描 `db_path` 下的表子目录并打开；运行期中新增的表目录可在落盘后发送 **`reload <表名>`**（`admin_unix_socket`）完成首次加载，已打开表的换盘同样使用该命令（详见 **[`db.md`](db.md)**）。
 
-### What each binary measures
+### 3.3 使用示例
 
-| Binary | Focus |
-|--------|--------|
-| **`kv_index_benchmark`** | **`KVIndex`** only: unique inserts (`PutUnique`), hot-row `Get`, scaled `Get` after N rows, same-key upserts. Arena sizing is fixed in source; several cases use **`Iterations(...)`** so mmap use stays bounded. |
-| **`db_benchmark`** | Full **`DB`**: **`CreateKVIndex`** with unique PK + **`Publish`**, inverted **`Put` + `Query`**, and **cold** **`OpenIndex` + full `Get` scan** after on-disk seed rows (`BM_DB_ColdOpenScan` **Arg** = row count). |
+**RPC 调用**
 
-### Reference performance (sample only)
+- 服务名：**`yikv.db.YikvDb`**；方法：**Get、Put、PutBatch、BatchGet**。
+- **brpc**：`baidu_std`，请求体为 FlatBuffers 序列化后的 `GetRequest` / `PutRequest` 等（见 `yikv_server.fbs`）。
+- **gRPC**：`h2:grpc`，`FbRpcRequest.payload` / `FbRpcResponse.payload` 为**同一套** FlatBuffers 字节。
 
-Recorded with **`-c opt`**, Google Benchmark **`--benchmark_min_time=0.05s`**, **2026-05-06**, on **16 logical CPUs** (~3.8 GHz nominal), Linux. **Figures vary** with CPU, turbo, **`/tmp`**, and load.
+任意语言：可用 **brpc C++** 或 **官方 gRPC + `yikv_grpc.proto` 生成 Stub**，按 fbs 表构造/解析 payload。双栈细节与 PutBatch 语义见 **[`db.md`](db.md)**。
 
-#### `kv_index_benchmark`
+**Kafka 实时写入（可选）**
 
-| Benchmark | CPU time | Notes |
-|-----------|----------|--------|
-| `BM_KVIndex_PutUnique/512` (40k iterations) | ~4.4 µs / op | Arg 512 = arena sizing in benchmark; unique PK each op. |
-| `BM_KVIndex_GetHit` | ~0.030 µs / op | Single hot key lookup. |
-| `BM_KVIndex_GetHitAtScale/100` … `/10000` | ~0.026–0.027 µs / op | Same lookup after 100 / 1k / 10k seeded rows (this machine). |
-| `BM_KVIndex_PutUpsertSameKey` (40k iters) | ~2.0 µs / op | Same PK every iteration. |
+在 `{db_path}/{表名}/table.json` 配置 topic 等；消息为 JSON，字段 **`_op`**（`INSERT`/`UPSERT`/`DELETE`）、**`_ts`**（毫秒）及业务字段。全局 broker 来自 `config.json` 的 `kafka.default_brokers`。完整约定见 [`apps/yikv_server/table_config.h`](apps/yikv_server/table_config.h) 与 [`db.md`](db.md)。
 
-#### `db_benchmark`
+---
 
-| Benchmark | CPU time | Notes |
-|-----------|----------|--------|
-| `BM_DB_KV_PutUnique` (30k iters) | ~5.4 µs / iter | **`Put` + `Publish`** per iteration. |
-| `BM_DB_Inverted_PutAndQuery` (15k iters) | ~5.0 µs / iter | One inverted row + **`Query("beta")`** per iter. |
-| `BM_DB_ColdOpenScan/200` | ~122 µs / iter | Per iter: **`Init` → `OpenIndex` → 200 × `Get`**. |
-| `BM_DB_ColdOpenScan/2000` | ~287 µs / iter | Same with 2000 keys scanned. |
+## 4. Benchmark
 
-Reproduce:
+**`yikv_server_bench`** 对 **Get** 发压，协议与线上一致（brpc `baidu_std`）。
+
+**必填**
+
+- `--server HOST:PORT`（别名 `--grpc_target`）
+- `--index`（或 `--table`）：须与已加载表名一致
+- 键源：**`--keys_file`** 或 **`--local_parquet PATH --pk COLUMN`**
+
+**负载**：`--requests N` 与 `--duration_sec T` 二选一；默认 `--requests 50000`。
+
+**常用**
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--workers` | 8 | 并发线程 |
+| `--warmup` | 32 | 预热次数 |
+| `--max_keys` | 200000 | 从 Parquet 采样主键上限 |
 
 ```bash
-bazel run -c opt //tests:kv_index_benchmark -- --benchmark_min_time=0.1s --benchmark_repetitions=1
-bazel run -c opt //tests:db_benchmark -- --benchmark_min_time=0.1s --benchmark_repetitions=1
+./bazel-bin/yikv_server_bench \
+  --server 127.0.0.1:9000 \
+  --index my_table \
+  --keys_file ./pks.txt \
+  --workers 16 \
+  --requests 1000000
 ```
+
+标准输出 **一行 JSON**（`qps`、`latency_ms`、`phases_ms` 等）。
+
+---
+
+## 延伸阅读
+
+- 协议与导入流水线架构：**[`db.md`](db.md)**
+- 离线索引 HTTP agent：**[`tools/pipeline_agent/pipeline_agent.py`](tools/pipeline_agent/pipeline_agent.py)**；Python 客户端：**[`tools/pipeline_agent/pipeline_http_client.py`](tools/pipeline_agent/pipeline_http_client.py)**
+- gRPC 定义：**[`proto/yikv_grpc.proto`](proto/yikv_grpc.proto)**

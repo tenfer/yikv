@@ -1,7 +1,15 @@
-MODULE.bazel.lock
-.claude
-bazel-out
-bazel-yikv
+nohup.out
 bazel-bin
+bazel-*
+bazel-out
 bazel-testlogs
-src/storage/cmake-build/
+artifact-storage.json
+*.pyc
+__pycache__
+reports/
+graphify-out/
+*_LAST_RUN.txt
+*.out
+
+# Optional local `bazel vendor --vendor_dir=vendor` snapshot (not committed).
+vendor/

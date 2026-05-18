@@ -1,9 +1,0 @@
-CompileFlags:
-  CompilationDatabase: .
-  # Fallback flags are provided by compile_flags.txt.
-
-Index:
-  Background: Build
-
-Diagnostics:
-  UnusedIncludes: None
