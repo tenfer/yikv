@@ -1,0 +1,10 @@
+package(default_visibility = ["//visibility:public"])
+
+# Basenames must match distdir lookup (basename of the original download URL) where noted in scripts/fetch_bazel_tarballs.sh
+exports_files([
+    "nlohmann_json-v3.10.5.tar.gz",
+    "brpc-1.16.0.tar.gz",
+    "bazel_features-v1.28.0.tar.gz",
+    "libpfm-4.11.0.tar.gz",
+    "cmake-3.23.2-linux-x86_64.tar.gz",
+])

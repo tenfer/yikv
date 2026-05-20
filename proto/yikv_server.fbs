@@ -1,0 +1,88 @@
+namespace yikv;
+
+enum ValueType : ubyte {
+  NONE = 0,
+  BOOL = 1,
+  I32 = 2,
+  I64 = 3,
+  F32 = 4,
+  F64 = 5,
+  STRING = 6,
+  BYTES = 7,
+  ARR_I32 = 8,
+  ARR_I64 = 9,
+  ARR_F32 = 10,
+  ARR_F64 = 11,
+  ARR_STRING = 12,
+}
+
+table FieldValue {
+  field_id:ushort;
+  vtype:ValueType;
+  i32:int32;
+  i64:int64;
+  f32:float;
+  f64:double;
+  s:string;
+  raw:[ubyte];
+  ai32:[int];
+  ai64:[long];
+  af32:[float];
+  af64:[double];
+  as:[string];
+  /// Logical column name from table schema (optional on write; server sets on read paths).
+  field_name:string;
+}
+
+table Row {
+  fields:[FieldValue];
+}
+
+table GetRequest {
+  pk:string (required);
+  table_name:string;
+}
+
+table GetResponse {
+  found:bool;
+  err:string;
+  row:Row;
+  index_get_ns:uint64;
+}
+
+table PutRequest {
+  row:Row (required);
+  table_name:string;
+}
+
+table PutResponse {
+  ok:bool;
+  err:string;
+}
+
+table BatchGetRequest {
+  pks:[string];
+  table_name:string;
+}
+
+table BatchGetResponse {
+  rows:[Row];
+  err:string;
+}
+
+table PutBatchRequest {
+  rows:[Row] (required);
+  table_name:string;
+}
+
+table PutBatchResponse {
+  ok:bool;
+  err:string;
+}
+
+rpc_service Yidiandb {
+  Get(GetRequest):GetResponse;
+  Put(PutRequest):PutResponse;
+  PutBatch(PutBatchRequest):PutBatchResponse;
+  BatchGet(BatchGetRequest):BatchGetResponse;
+}

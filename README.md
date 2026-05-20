@@ -33,7 +33,7 @@ cd yikv-server
 bazel build //:yikv_server //:yikv_import_pipeline //:yikv_server_bench
 ```
 
-可执行文件在 `bazel-bin/`（或 `bazel run //:yikv_server -- /path/to/config.json`）。默认从网络/cache 解析 Bzlmod（见 [`bazel/vendor.bazelrc`](bazel/vendor.bazelrc)）。可选本地 vendor：**`bazel vendor --vendor_dir=vendor`** 生成 **`vendor/`**（含 **`VENDOR.bazel`**，仅本地、已由 **`.gitignore`** 忽略）后 **`bazel build --config=vendor`**；离线 **`--config=vendor_offline`** 仍依赖 **`third_party/tarball`** 与已填充的 **`vendor/`**。**`docker build`**：镜像内 **`builder`** 在线解析；国内可加 **`--build-arg BAZEL_VENDOR_CONFIG=cn`**。
+可执行文件在 `bazel-bin/`（或 `bazel run //:yikv_server -- [/path/to/config.json]`，可省略参数以使用默认路径）。默认从网络/cache 解析 Bzlmod（见 [`bazel/vendor.bazelrc`](bazel/vendor.bazelrc)）。可选本地 vendor：**`bazel vendor --vendor_dir=vendor`** 生成 **`vendor/`**（含 **`VENDOR.bazel`**，仅本地、已由 **`.gitignore`** 忽略）后 **`bazel build --config=vendor`**；离线 **`--config=vendor_offline`** 仍依赖 **`third_party/tarball`** 与已填充的 **`vendor/`**。**`docker build`**：镜像内 **`builder`** 在线解析；国内可加 **`--build-arg BAZEL_VENDOR_CONFIG=cn`**。
 
 **版本**：发布以 **语义化 git tag（如 `v0.1.0`）** 为主；[`MODULE.bazel`](MODULE.bazel) 顶层 `module(version = …)` 应在发版时与 tag **对齐**，便于下游与锁文件对照。
 
@@ -50,6 +50,12 @@ bazel build //:yikv_server //:yikv_import_pipeline //:yikv_server_bench
 | `arena_seg_gb` / `arena_max_gb` | 单段与总 arena 上限 (GiB) |
 | `exclusive_arena_lock` | 默认 `true`，导入与服务不要同时写同一库 |
 | `kafka.default_brokers` | 可选；表级可在 `table.json` 覆盖 |
+
+**启动方式与默认值**
+
+- **命令行**：`yikv_server [配置文件路径]` —— **可省略**第二个参数：未传参时依次尝试环境变量 **`YIKV_SERVER_CONFIG`**（非空则用）、否则 **`/etc/yikv/config.json`**（与容器内常见挂载路径一致）。显式路径：`yikv_server ./config.json`。镜像 **`ENTRYPOINT`** 仅启动二进制，不设 **`CMD`** 时即走上述默认。
+- **JSON 内容**：**必填仅 `db_path`**。其余键可省略，语义与 [`apps/yikv_server/server_config.h`](apps/yikv_server/server_config.h) 中 **`ServerConfig` 默认成员**一致（与 [`config.example.json`](config.example.json) 对齐，例如 `listen`、`arena_seg_gb` / `arena_max_gb`、`exclusive_arena_lock`、`kafka.default_brokers`）。若 **`admin_unix_socket` 省略或留空**，加载逻辑会将其设为 **`{db_path 的父目录}/admin.sock`**（见 `LoadServerConfig`）。
+- **每个表（index）目录**：`{db_path}/<表名>/` 内需有 **`schema.json`**（离线索引构建写入，描述列与主键；与引擎约定一致）。可选同目录 **`table.json`** 配置 Kafka 等（见上表「表级」说明与 [`apps/yikv_server/table_config.h`](apps/yikv_server/table_config.h)）。
 
 ### 2.1 容器镜像与 Kubernetes（Ubuntu 22.04）
 

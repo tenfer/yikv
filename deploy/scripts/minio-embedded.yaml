@@ -1,0 +1,122 @@
+# Single-node MinIO (S3 API :9000, Web Console :9001). This file uses NAMESPACE_PLACEHOLDER — do not run:
+#   kubectl apply -f minio-embedded.yaml
+# Substitute the placeholder, or use:
+#   MINIO_NAMESPACE=minio ./deploy/scripts/apply_minio_embedded.sh
+# Kind: deploy/k8s/start_minio_kind_cluster.sh renders + applies for you.
+# Data: PersistentVolumeClaim `minio-data` (ReadWriteOnce), StorageClass `local-path`
+# (Rancher local-path-provisioner — start_minio_kind_cluster.sh installs it; works on Kind).
+# On cloud clusters, set MINIO_STORAGE_CLASS when applying or edit to your cluster's SC.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-root
+  namespace: "NAMESPACE_PLACEHOLDER"
+type: Opaque
+stringData:
+  # MinIO validates MINIO_ROOT_USER length >= 3 and MINIO_ROOT_PASSWORD >= 8 (see server startup).
+  root-user: "minio"
+  root-password: "minio12345"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: "NAMESPACE_PLACEHOLDER"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: minio
+  ports:
+    - name: api
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+    - name: console
+      port: 9001
+      targetPort: 9001
+      protocol: TCP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: "NAMESPACE_PLACEHOLDER"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: "NAMESPACE_PLACEHOLDER"
+  labels:
+    app.kubernetes.io/name: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: minio
+    spec:
+      # MinIO 进程以 UID 1000 运行。hostPath/local-path 上几类根用户创建的目录会令 fsGroup 不够，
+      # Pod 会 CrashLoop（无写权限）；initContainer 先把挂载点交给 1000:1000。
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+      initContainers:
+        - name: volume-permissions
+          image: registry.k8s.io/e2e-test-images/busybox:1.36.1-1
+          command: ["sh", "-c", "chown -R 1000:1000 /data"]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: minio
+          image: quay.io/minio/minio:latest
+          args: ["server", "/data"]
+          ports:
+            - containerPort: 9000
+              name: api
+            - containerPort: 9001
+              name: console
+          readinessProbe:
+            tcpSocket:
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: minio-root
+                  key: root-user
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: minio-root
+                  key: root-password
+            # Default console may bind to loopback only; hostPort / ingress need all interfaces.
+            - name: MINIO_CONSOLE_ADDRESS
+              value: "0.0.0.0:9001"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: minio-data

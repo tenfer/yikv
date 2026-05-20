@@ -1,0 +1,23 @@
+# Same as kind-config.yaml + extraMounts for MinIO data on the host (see README: E2E_PERSIST_MINIO_DATA).
+# Keep extraPortMappings in sync with kind-config.yaml when changing ports.
+# __E2E_MINIO_HOST_DATA_DIR__ is replaced at cluster create time with the absolute host path.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: __E2E_MINIO_HOST_DATA_DIR__
+        containerPath: /mnt/yikv-e2e-minio
+    extraPortMappings:
+      - containerPort: 30900
+        hostPort: 30900
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+      - containerPort: 30901
+        hostPort: 30901
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+      - containerPort: 30902
+        hostPort: 30902
+        listenAddress: "0.0.0.0"
+        protocol: TCP

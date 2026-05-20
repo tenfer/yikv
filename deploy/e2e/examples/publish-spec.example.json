@@ -1,0 +1,5 @@
+{
+  "table": "e2e_demo",
+  "input": "s3://yikv-artifacts/e2e-input/",
+  "cleanup_build_db_after_push": true
+}

@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: yikv
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+
+# Kustomize 5+ prefers `labels` over deprecated `commonLabels`.
+labels:
+  - includeSelectors: true
+    pairs:
+      app.kubernetes.io/name: yikv-server

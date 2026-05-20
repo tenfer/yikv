@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package yikv.db;
+
+// Wire contract (yikv-server):
+//   Protocol: brpc baidu_std
+//   Dispatch: BaiduMasterService (SerializedRequest / SerializedResponse)
+//   service_name: "yikv.db.YikvDb"
+//   method names: Get, Put, PutBatch, BatchGet
+//   Body: FlatBuffers root tables in namespace yikv (see proto/yikv_server.fbs).
+//
+// This file carries no RPC service definition for protoc-gen; it documents the
+// contract and provides a proto package name matching C++ rpc_constants.
+
+message RpcWireContract {
+  string service_full_name = 1;  // "yikv.db.YikvDb"
+}

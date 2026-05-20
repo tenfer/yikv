@@ -1,0 +1,12 @@
+# Kind / local: use node-local image only (kind load / KIND_LOAD=1).
+# Prevents kubelet from pulling docker.io/library/yikv-server:latest (not public).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yikv-server
+spec:
+  template:
+    spec:
+      containers:
+        - name: yikv-server
+          imagePullPolicy: Never

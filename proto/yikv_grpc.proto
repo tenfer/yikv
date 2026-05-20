@@ -1,0 +1,28 @@
+// Standard gRPC over HTTP/2 (use brpc client with protocol "h2:grpc" or any gRPC implementation).
+// Request/response bodies: FlatBuffers root tables (same as baidu_std path), see proto/yikv_server.fbs.
+//
+// Full service name for gRPC: yikv.db.YikvDb
+
+syntax = "proto2";
+
+package yikv.db;
+
+option cc_generic_services = true;
+
+message FbRpcRequest {
+  // Serialized FlatBuffer: GetRequest, PutRequest, PutBatchRequest, or BatchGetRequest.
+  required bytes payload = 1;
+}
+
+message FbRpcResponse {
+  // Serialized FlatBuffer: matching *Response table; errors are encoded inside (ok/err fields).
+  optional bytes payload = 1;
+}
+
+// Same logical service as brpc BaiduMasterService (yikv.db.YikvDb / Get, Put, …).
+service YikvDb {
+  rpc Get(FbRpcRequest) returns (FbRpcResponse);
+  rpc Put(FbRpcRequest) returns (FbRpcResponse);
+  rpc PutBatch(FbRpcRequest) returns (FbRpcResponse);
+  rpc BatchGet(FbRpcRequest) returns (FbRpcResponse);
+}

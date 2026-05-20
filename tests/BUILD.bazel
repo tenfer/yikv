@@ -1,0 +1,109 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
+load("//:bazel/yikv_compat.bzl", "YIKV_COMPAT_COPTS")
+
+package(default_visibility = ["//visibility:public"])
+
+# ─── L0: RPC handlers (FlatBuffers → HandleGet/Put/Batch) — no TCP ───────────
+cc_test(
+    name = "handlers_rpc_test",
+    size = "small",
+    srcs = ["handlers_rpc_test.cc"],
+    copts = ["-std=c++20"] + YIKV_COMPAT_COPTS,
+    includes = [
+        "../apps/yikv_server",
+        "../gen",
+        "../deps/include",
+    ],
+    deps = [
+        "//:db_fbs",
+        "//:db_handlers_lib",
+        "@googletest//:gtest_main",
+        "//libs/yikv/db:db",
+        "//libs/yikv/schema:schema",
+    ],
+)
+
+# ─── json_stream_ingest: merge semantics, array append, op dispatch ───────────
+# No Kafka / OSS dependency. Runs in < 1s.
+cc_test(
+    name = "json_stream_ingest_test",
+    size = "small",
+    srcs = ["json_stream_ingest_test.cc"],
+    copts = ["-std=c++20"] + YIKV_COMPAT_COPTS,
+    includes = ["../apps/yikv_server"],
+    deps = [
+        "//:json_stream_ingest",
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+        "//libs/yikv/alloc:ft_allocator",
+        "//libs/yikv/index:kv_index",
+        "//libs/yikv/schema:schema",
+    ],
+)
+
+# ─── offset file I/O and timestamp formula ────────────────────────────────────
+# Tests the kafka.offset / kafka_meta.json contract without any Kafka broker.
+cc_test(
+    name = "kafka_offset_test",
+    size = "small",
+    srcs = ["kafka_offset_test.cc"],
+    copts = ["-std=c++20"],
+    deps = [
+        "@googletest//:gtest_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+# ─── Kafka mock: RunKafkaImportCatchup with embedded mock broker ───────────────
+# Requires librdkafka >= 1.4 with mock support. Tests are skipped gracefully
+# if the mock cluster is unavailable. Tag "kafka-mock" to run selectively.
+cc_test(
+    name = "kafka_source_test",
+    size = "medium",
+    srcs = ["kafka_source_test.cc"],
+    copts = ["-std=c++20"] + YIKV_COMPAT_COPTS,
+    includes = ["../apps/yikv_server"],
+    tags = ["kafka-mock"],
+    deps = [
+        "//:kafka_import_catchup_lib",
+        "@googletest//:gtest_main",
+        "@librdkafka//:rdkafka",
+        "@nlohmann_json//:json",
+        "//libs/yikv/alloc:ft_allocator",
+        "//libs/yikv/index:kv_index",
+        "//libs/yikv/schema:schema",
+    ],
+)
+
+cc_test(
+    name = "metrics_test",
+    size = "small",
+    srcs = ["metrics_test.cc"],
+    copts = ["-std=c++20"],
+    includes = ["../apps/yikv_server"],
+    deps = [
+        "//:metrics_lib",
+        "@googletest//:gtest_main",
+    ],
+)
+
+test_suite(
+    name = "all_tests",
+    tests = [
+        ":handlers_rpc_test",
+        ":json_stream_ingest_test",
+        ":kafka_offset_test",
+        ":metrics_test",
+    ],
+)
+
+test_suite(
+    name = "all_tests_with_mock",
+    tests = [
+        ":handlers_rpc_test",
+        ":json_stream_ingest_test",
+        ":kafka_offset_test",
+        ":kafka_source_test",
+        ":metrics_test",
+    ],
+)

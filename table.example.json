@@ -1,0 +1,7 @@
+{
+  "kafka": {
+    "topic": "my-topic",
+    "partition": 0,
+    "brokers": "override:9092"
+  }
+}

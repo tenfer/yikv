@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yikv-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: yikv-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: yikv-server
+    spec:
+      containers:
+        - name: yikv-server
+          image: yikv-server:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: rpc
+              containerPort: 9000
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/yikv
+              readOnly: true
+            - name: data
+              mountPath: /data
+          startupProbe:
+            tcpSocket:
+              port: rpc
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: rpc
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "500m"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+      volumes:
+        - name: config
+          configMap:
+            name: yikv-server-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: yikv-data

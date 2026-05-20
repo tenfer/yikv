@@ -1,0 +1,10 @@
+{
+  "work": "/data/yikvdb",
+  "import_listen": "127.0.0.1:59999",
+  "server_listen": "0.0.0.0:9000",
+  "arena_seg_gb": 1,
+  "arena_max_gb": 4,
+  "import_io_workers": 1,
+  "import_queue_batches": 8,
+  "auto_start_server": true
+}

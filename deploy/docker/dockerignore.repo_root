@@ -1,0 +1,25 @@
+# DEPRECATED dual-repo layout (<yikv> + <yikv-server> siblings under one parent).
+# Current workflow: `.dockerignore` lives at **yikv-server repository root**.
+# Keeping this file for historical reference only; Docker scripts no longer sync it automatically.
+#
+# (Legacy) Install next to sibling repos as "${REPO_ROOT}/.dockerignore"
+# REPO_ROOT = parent directory containing BOTH ./yikv and ./yikv-server
+# (same context as: docker build -f yikv-server/deploy/docker/Dockerfile "${REPO_ROOT}")
+#
+# run-publish-job.sh copies this file by default unless YIKV_INSTALL_REPO_ROOT_DOCKERIGNORE=0
+
+**/.git
+**/.svn
+
+yikv/bazel-*
+yikv-server/bazel-*
+yikv-server/reports/
+yikv-server/graphify-out/
+
+# Omit vendor snapshot — builder uses online Bzlmod.
+yikv-server/vendor/
+
+**/node_modules
+**/__pycache__
+*.pyc
+*.pyo

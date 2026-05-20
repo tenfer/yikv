@@ -1,0 +1,18 @@
+# Static PersistentVolume for single-node Kind: no StorageClass provisioner required.
+# Path exists on the Kind control-plane node container (Docker/Podman volume).
+# One PV per cluster; if you need multiple MinIO stacks, use distinct PV names / paths.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: minio-pv
+spec:
+  capacity:
+    storage: 20Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Delete
+  storageClassName: minio-hostpath
+  hostPath:
+    path: /var/lib/yikv-minio
+    type: DirectoryOrCreate

@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+images:
+  - name: yikv-server
+    newName: yikv-server
+    newTag: latest
+
+# Optional: set your registry
+# images:
+#   - name: yikv-server
+#     newName: docker.io/myorg/yikv-server
+#     newTag: "1.0.0"
+
+# Optional: storage class / size
+# patches:
+#   - patch: |-
+#       - op: replace
+#         path: /spec/resources/requests/storage
+#         value: 100Gi
+#     target:
+#       kind: PersistentVolumeClaim
+#       name: yikv-data

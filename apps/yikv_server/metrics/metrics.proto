@@ -1,0 +1,17 @@
+// Minimal protobuf service skeleton used solely to register the /metrics HTTP
+// endpoint with brpc. The actual request/response bodies are transported via
+// HTTP headers and Controller::response_attachment(); the proto messages are
+// dummy placeholders required by brpc's protobuf-based dispatch.
+
+syntax = "proto2";
+
+package yikv_server.metrics.proto;
+
+option cc_generic_services = true;
+
+message PromReq {}
+message PromResp {}
+
+service PromHttpService {
+  rpc Scrape(PromReq) returns (PromResp);
+}

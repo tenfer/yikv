@@ -1,0 +1,11 @@
+# Unified Python dependencies for yikv-server (agent, deploy scripts, samples, Docker venv).
+# Install: pip install -r requirements.txt
+fastapi>=0.109.0
+flatbuffers>=23.5.0
+grpcio>=1.60.0
+kubernetes>=29.0.0
+minio>=7.2.0
+pyarrow>=14.0.0
+pydantic>=2.5.0
+uvicorn[standard]>=0.27.0
+pandas>=2.2.0

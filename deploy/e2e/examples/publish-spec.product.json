@@ -1,0 +1,6 @@
+{
+  "table": "product",
+  "input": "s3://yikv-artifacts/e2e-input/product/",
+  "schema_json": "deploy/e2e/fixtures/product/schema.json",
+  "cleanup_build_db_after_push": true
+}

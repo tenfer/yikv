@@ -1,0 +1,24 @@
+{
+  "db_path": "/data/db",
+  "listen": "0.0.0.0:9000",
+  "arena_seg_gb": 1,
+  "arena_max_gb": 512,
+  "exclusive_arena_lock": true,
+  "admin_unix_socket": "/data/admin.sock",
+  "kafka": {
+    "default_brokers": "kafka:9092"
+  },
+  "artifact_storage": {
+    "provider": "s3_compatible",
+    "env": "e2e-dev",
+    "key_prefix": "yikv-index",
+    "s3_compatible": {
+      "bucket": "yikv-artifacts",
+      "endpoint": "http://127.0.0.1:30900",
+      "region": "shanghai",
+      "access_key_id": "minio",
+      "secret_access_key": "minio12345",
+      "force_path_style": true
+    }
+  }
+}

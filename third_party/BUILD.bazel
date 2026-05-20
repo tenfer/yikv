@@ -1,0 +1,7 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "bazel_features_module_dot_bazel_version.patch",
+    "libpfm_module_dot_bazel.patch",
+    "libpfm_add_build_file.patch",
+])

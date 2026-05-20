@@ -1,0 +1,18 @@
+# Single-node Kind cluster for local/dev MinIO only.
+# See start_minio_kind_cluster.sh
+#
+# extraPortMappings: publish Kind node ports 30900 (S3 API) and 30901 (Web Console) on Docker host.
+# Pod hostPorts 30900/30901 when KIND_EXPOSE_MINIO_NODEPORT=1 (default). Recreate Kind if 30901 mapping was added later.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30900
+        hostPort: 30900
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+      - containerPort: 30901
+        hostPort: 30901
+        listenAddress: "0.0.0.0"
+        protocol: TCP

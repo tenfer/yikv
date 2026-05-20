@@ -1,0 +1,22 @@
+# No vendor/VENDOR.bazel in the repo; optional local vendor/ from `bazel vendor --vendor_dir=vendor`.
+#
+# Default: resolve deps from network / cache (do not set `--vendor_dir` globally).
+#
+# `--config=vendor` — use a local vendor snapshot:
+#   bazel vendor --vendor_dir=vendor
+#   bazel build --config=vendor //...
+#
+# `third_party/tarball` still speeds installs when blobs exist (still allows network fallback):
+#   - MODULE.bazel `local_tarball` (nlohmann_json, brpc)
+#   - --distdir basename must match upstream URL basename (CMake, bazel_features, …)
+common --distdir=third_party/tarball
+
+common:vendor --vendor_dir=vendor
+
+# Hard offline verification (requires populated vendor/ + third_party/tarball/):
+#   bash scripts/fetch_bazel_tarballs.sh
+#   bazel vendor --vendor_dir=vendor
+#   bazel build --config=vendor_offline //...
+common:vendor_offline --vendor_dir=vendor
+common:vendor_offline --distdir=third_party/tarball
+common:vendor_offline --repository_disable_download

@@ -1,0 +1,15 @@
+# docker build context = yikv-server repository root (see deploy/docker/Dockerfile).
+**/.git
+**/.svn
+
+bazel-*
+reports/
+graphify-out/
+
+# Omit vendor snapshot — image builds use online Bzlmod (same as host).
+vendor/
+
+**/node_modules
+**/__pycache__
+*.pyc
+*.pyo

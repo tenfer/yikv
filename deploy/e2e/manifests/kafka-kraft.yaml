@@ -1,0 +1,88 @@
+# Single-broker Apache Kafka (KRaft) — dual listeners for in-cluster + LAN.
+# Placeholder __KAFKA_LAN_HOST__ (IP or DNS) is replaced by bootstrap-infra.sh → EXTERNAL advertised host.
+# In-cluster: kafka:9092 -> Service targets INTERNAL listener on 29092 .
+# LAN: EXTERNAL listener binds to 30902 inside the pod (same as hostPort) so advertised :30902 matches bind port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: yikv
+  labels:
+    app.kubernetes.io/name: kafka
+spec:
+  type: ClusterIP
+  ports:
+    - name: broker
+      port: 9092
+      targetPort: 29092
+  selector:
+    app.kubernetes.io/name: kafka
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka
+  namespace: yikv
+  labels:
+    app.kubernetes.io/name: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kafka
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:3.8.1
+          ports:
+            - containerPort: 29092
+              name: internal
+            - containerPort: 30902
+              name: external
+              hostPort: 30902
+            - containerPort: 9093
+              name: controller
+          env:
+            - name: CLUSTER_ID
+              value: "4L6g3nShT-eMCtK--X86sw"
+            - name: KAFKA_NODE_ID
+              value: "1"
+            - name: KAFKA_PROCESS_ROLES
+              value: broker,controller
+            - name: KAFKA_LISTENERS
+              value: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:30902,CONTROLLER://0.0.0.0:9093
+            - name: KAFKA_ADVERTISED_LISTENERS
+              value: INTERNAL://kafka.yikv.svc.cluster.local:29092,EXTERNAL://__KAFKA_LAN_HOST__:30902
+            - name: KAFKA_INTER_BROKER_LISTENER_NAME
+              value: INTERNAL
+            - name: KAFKA_CONTROLLER_LISTENER_NAMES
+              value: CONTROLLER
+            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+              value: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+              value: "1@127.0.0.1:9093"
+            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+              value: "1"
+            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+              value: "1"
+            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
+              value: "0"
+            - name: KAFKA_NUM_PARTITIONS
+              value: "1"
+          readinessProbe:
+            tcpSocket:
+              port: 29092
+            initialDelaySeconds: 25
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: 29092
+            initialDelaySeconds: 120
+            periodSeconds: 20

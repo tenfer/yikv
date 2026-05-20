@@ -1,0 +1,20 @@
+# Kind forwards host 30900/30901 -> node; MinIO pod must use hostPort 30900/30901 (bootstrap-infra default E2E_EXPOSE_MINIO_HOSTPORT=1).
+# If you add ports here, keep deploy/e2e/kind-config-persist.yaml.in extraPortMappings in sync (E2E_PERSIST_MINIO_DATA=1).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30900
+        hostPort: 30900
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+      - containerPort: 30901
+        hostPort: 30901
+        listenAddress: "0.0.0.0"
+        protocol: TCP
+      # Kafka EXTERNAL: container listens on 30902; hostPort 30902; Kind forwards host:30902 -> node:30902
+      - containerPort: 30902
+        hostPort: 30902
+        listenAddress: "0.0.0.0"
+        protocol: TCP

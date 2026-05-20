@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: yikv-server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: yikv-server
+  ports:
+    - name: rpc
+      port: 9000
+      targetPort: rpc
+      protocol: TCP
